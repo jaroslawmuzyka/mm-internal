@@ -280,7 +280,7 @@ embedding_top_n = st.slider(
     "Liczba propozycji z warstwy embedding_podobienstwo na strone (0 = wylacz, max 10)",
     min_value=0,
     max_value=10,
-    value=5,
+    value=10,
     help=(
         "Dodatkowa warstwa rekomendacji oparta o podobienstwo tresci (cosine similarity "
         "na embeddingach z kolumny 'Extract embeddings from page content' w Internal HTML). "
@@ -417,7 +417,19 @@ if run_clicked:
         st.bar_chart(rule_counts)
 
         st.subheader("Podglad kandydatow (pierwsze 200 wierszy)")
-        st.dataframe(pd.DataFrame(all_candidates).head(200), use_container_width=True)
+        st.dataframe(pd.DataFrame(all_candidates).head(200), width="stretch")
+
+        # Liczenie regul (i warstwy embedding_podobienstwo) trwa milisekundy nawet
+        # dla tysiecy stron - realny czas czekania to zapis xlsx: stylowanie
+        # komorka-po-komorce w openpyxl dla kilkunastu tysiecy wierszy potrafi
+        # zajac dziesiatki sekund, stad pasek postepu wlasnie tutaj.
+        progress_bar = st.progress(0, text="Zapisywanie pliku 'do oceny'...")
+
+        def _make_progress_cb(prefix):
+            def _cb(stage, done, total):
+                frac = min(max(done / total, 0.0), 1.0) if total else 1.0
+                progress_bar.progress(frac, text=f"{prefix}: {stage} - {done}/{total} wierszy ({frac * 100:.0f}%)")
+            return _cb
 
         review_bytes = build_review_workbook(
             all_candidates,
@@ -432,8 +444,15 @@ if run_clicked:
             embedding_top_n=result["embedding_top_n"],
             embedding_skipped=result["embedding_skipped"],
             all_input_urls=all_input_urls,
+            progress=_make_progress_cb("Plik 'do oceny'"),
         )
-        contentful_bytes = build_contentful_matrix(all_candidates)
+
+        progress_bar.progress(0, text="Zapisywanie macierzy Contentful...")
+        contentful_bytes = build_contentful_matrix(
+            all_candidates,
+            progress=_make_progress_cb("Macierz Contentful"),
+        )
+        progress_bar.progress(1.0, text="Gotowe!")
 
         st.session_state["review_bytes"] = review_bytes
         st.session_state["contentful_bytes"] = contentful_bytes

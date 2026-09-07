@@ -31,7 +31,7 @@ struktura (kategorie / filtry-fasety / strony marek + breadcrumb).
    lista Marki nie wymienia osobno, bo wymienia tylko glowne strony marek.
 3. **Zaznaczasz wykluczenia** (3xx, 4xx, noindex), ustawiasz suwaki **"Maksymalna
    roznica poziomow"** (domyslnie 1), **"Liczba propozycji z warstwy
-   embedding_podobienstwo"** (domyslnie 5, max **10**, `0` = wylacz - patrz
+   embedding_podobienstwo"** (domyslnie **10** = max, `0` = wylacz - patrz
    sekcja Reguly ponizej), opcjonalnie **"Sufiks do usuniecia z konca Anchor"**
    (np. stala nazwa sklepu na koncu H1) i klikasz "Uruchom analize".
 4. **Dostajesz dwa pliki:**
@@ -48,6 +48,14 @@ struktura (kategorie / filtry-fasety / strony marek + breadcrumb).
 
    W **obu plikach** komorka `Target_URL` / `Link_N` jest kolorowana wg
    pewnosci dopasowania - patrz "Skala pewnosci" w sekcji Reguly ponizej.
+
+**Pasek postepu:** liczenie regul (wliczajac cosine similarity dla warstwy
+embedding_podobienstwo) trwa milisekundy nawet dla kilku tysiecy stron - to
+NIE tam realnie czekasz. Wasko gardlo to zapis samych plikow xlsx: stylowanie
+komorka-po-komorce w openpyxl dla kilkunastu tysiecy wierszy potrafi zajac
+kilkadziesiat sekund, wiec pasek postepu (z etykieta arkusza i liczba
+zapisanych wierszy) pokazuje sie wlasnie na tym etapie - osobno dla pliku
+"do oceny" i osobno dla macierzy Contentful.
 
 Jest tez opcjonalny "Krok 2": jesli recznie poprawisz plik "do oceny"
 (usunites/dodasz wiersze w ktorejkolwiek z zakladek `Kandydaci do link.
@@ -165,7 +173,7 @@ mapowania przez osobny arkusz Main Category → Final URL).
    warstwa po prostu jest pusta, reszta narzedzia dziala normalnie. Dla
    kazdej strony z poprawnym embeddingiem liczy **cosine similarity** do
    wszystkich innych stron z embeddingiem i wybiera `embedding_top_n`
-   (suwak w UI, domyslnie 5, **max 10**) najbardziej podobnych - ale
+   (suwak w UI, domyslnie **10** = max) najbardziej podobnych - ale
    **pomijajac pary, ktore juz maja rekomendacje z ktorejkolwiek innej
    reguly** (niezaleznie czy zostaly odciete limitem glebokosci). To
    gwarantuje, ze ta warstwa tylko DOKLADA nowe propozycje, nigdy nie

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import io
 from collections import Counter, defaultdict
+from typing import Callable
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill
@@ -63,22 +64,40 @@ def _autosize(ws):
         ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(max(length + 2, 10), 80)
 
 
-def _write_table(ws, headers, rows, color_target_by_rule=False):
+def _write_table(ws, headers, rows, color_target_by_rule=False, extra_style=None, on_progress=None):
     """
     `color_target_by_rule`: koloruje komorke Target_URL wg pewnosci reguly
     (patrz TIER_FILL_COLORS) - tylko dla wierszy, ktore maja niepuste Rule
     (pomija np. placeholdery L1 bez zadnej propozycji).
+    `extra_style(ws, row_num, row)`: opcjonalny dodatkowy hook stylowania
+    wiersza (np. kolorowanie Status Code / Indexability w arkuszu adresow
+    wejsciowych) - wywolywany po dopisaniu wiersza.
+    `on_progress(i)`: opcjonalny callback wywolywany co ~1/30 wierszy (i = ile
+    juz zapisano W TYM arkuszu).
+
+    WAZNE: numer aktualnie dopisanego wiersza liczymy sami (`i + 1`, bo naglowek
+    to wiersz 1) - NIGDY nie uzywac `ws.max_row` w tej petli. `ws.max_row` w
+    openpyxl skanuje WSZYSTKIE komorki arkusza (`max(self._cells)`), wiec
+    wywolane raz na wiersz zmienia zapis z O(n) w O(n^2) - dla ~15k wierszy to
+    bylo >50s zamiast <2s (znalezione profilerem, patrz historia commitow).
     """
     ws.append(headers)
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="4472C4")
     target_col = headers.index("Target_URL") + 1 if "Target_URL" in headers else None
-    for row in rows:
+    total = len(rows)
+    report_every = max(total // 30, 1)
+    for i, row in enumerate(rows, start=1):
         ws.append([row.get(h, "") for h in headers])
+        row_num = i + 1  # naglowek to wiersz 1, i-ty wiersz danych to i+1
         rule = row.get("Rule")
         if color_target_by_rule and target_col and rule:
-            ws.cell(row=ws.max_row, column=target_col).fill = _tier_fill(rule)
+            ws.cell(row=row_num, column=target_col).fill = _tier_fill(rule)
+        if extra_style:
+            extra_style(ws, row_num, row)
+        if on_progress and (i % report_every == 0 or i == total):
+            on_progress(i)
     ws.freeze_panes = "A2"
     _autosize(ws)
 
@@ -97,7 +116,16 @@ def build_review_workbook(
     embedding_top_n: int | None = None,
     embedding_skipped: list[str] | None = None,
     all_input_urls: list[dict] | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> bytes:
+    """
+    `progress(stage_label, rows_written_so_far, grand_total_rows)`: opcjonalny
+    callback do paska postepu - wywolywany podczas zapisu arkuszy (~30x per
+    arkusz). To TU realnie plynie czas dla duzych analiz (stylowanie komorka-
+    po-komorce w openpyxl dla kilkunastu tysiecy wierszy potrafi zajac
+    dziesiatki sekund) - nie w liczeniu regul/embeddingow, ktore trwa
+    milisekundy nawet dla tysiecy stron.
+    """
     cut_by_depth_candidates = cut_by_depth_candidates or []
     brand_generic_excluded = brand_generic_excluded or []
     l1_outbound_candidates = l1_outbound_candidates or []
@@ -110,8 +138,6 @@ def build_review_workbook(
         for r in c["Rule"].split(" + "):
             rule_counts[r] += 1
 
-    wb = openpyxl.Workbook()
-
     candidate_headers = [
         "Source_URL", "Target_URL", "Rule", "Source_Level",
         "Source_Type", "Target_Type", "Target_Level",
@@ -121,14 +147,6 @@ def build_review_workbook(
     for c in all_candidates:
         candidates_by_source_type[c["Source_Type"]].append(c)
 
-    ws1 = wb.active
-    for i, (source_type, sheet_name) in enumerate(SOURCE_TYPE_SHEET_NAMES):
-        ws = ws1 if i == 0 else wb.create_sheet(sheet_name)
-        if i == 0:
-            ws.title = sheet_name
-        _write_table(ws, candidate_headers, candidates_by_source_type.get(source_type, []), color_target_by_rule=True)
-
-    ws2 = wb.create_sheet("L1_do_uzupelnienia")
     l1_headers = [
         "Source_URL", "Target_URL", "Rule", "Source_Level",
         "Source_Type", "Target_Type", "Target_Level",
@@ -163,9 +181,7 @@ def build_review_workbook(
                 row = dict(c)
                 row["Uwaga"] = NOTE_L1_HAS_CANDIDATES
                 l1_rows.append(row)
-    _write_table(ws2, l1_headers, l1_rows, color_target_by_rule=True)
 
-    ws2b = wb.create_sheet("L2_pod_L1_bez_siostr")
     l2_headers = ["Source_URL", "Source_Type", "Source_Level", "Dzial_L1_rodzic", "Target_URL", "Target_Type", "Anchor", "Uwaga"]
     l2_rows = [
         {
@@ -182,19 +198,13 @@ def build_review_workbook(
         }
         for p in sorted(l2_under_l1_no_siblings, key=lambda x: (x.direct_parent_url or "", x.url))
     ]
-    _write_table(ws2b, l2_headers, l2_rows)
 
-    ws2c = wb.create_sheet("Pominiete_zbyt_glebokie")
     depth_headers = [
         "Source_URL", "Target_URL", "Rule", "Source_Level",
         "Source_Type", "Target_Type", "Target_Level",
         "Poziom_roznica", "Anchor", "Podobienstwo",
     ]
-    _write_table(ws2c, depth_headers, cut_by_depth_candidates, color_target_by_rule=True)
-    if ws2c.max_row == 1:
-        ws2c.append(["(brak - wszyscy kandydaci miesca sie w limicie glebokosci)"])
 
-    ws2d = wb.create_sheet("Marka_wykluczona_generyczna")
     generic_headers = ["Source_URL", "Source_Type", "Source_Level", "Anchor", "Uwaga"]
     generic_rows = [
         {
@@ -212,26 +222,51 @@ def build_review_workbook(
         }
         for p in sorted(brand_generic_excluded, key=lambda x: x.url)
     ]
-    _write_table(ws2d, generic_headers, generic_rows)
 
-    ws2e = wb.create_sheet("Wszystkie_adresy_wejsciowe")
     input_url_headers = ["URL", "Typ", "Źródło", "Status Code", "Indexability"]
     input_url_rows = sorted(all_input_urls, key=lambda r: (r.get("Typ", ""), r.get("URL", "")))
-    ws2e.append(input_url_headers)
-    for c in ws2e[1]:
-        c.font = Font(bold=True, color="FFFFFF")
-        c.fill = PatternFill("solid", fgColor="4472C4")
     status_col = input_url_headers.index("Status Code") + 1
     indexability_col = input_url_headers.index("Indexability") + 1
     bad_fill = PatternFill("solid", fgColor=TIER_FILL_COLORS[3])  # czerwony - do rzucenia sie w oczy
-    for row in input_url_rows:
-        ws2e.append([row.get(h, "") for h in input_url_headers])
+
+    def _style_input_url_row(ws, row_num, row):
         if row.get("Status Code") not in (None, "", 200):
-            ws2e.cell(row=ws2e.max_row, column=status_col).fill = bad_fill
+            ws.cell(row=row_num, column=status_col).fill = bad_fill
         if row.get("Indexability") not in (None, "", "Indexable"):
-            ws2e.cell(row=ws2e.max_row, column=indexability_col).fill = bad_fill
-    ws2e.freeze_panes = "A2"
-    _autosize(ws2e)
+            ws.cell(row=row_num, column=indexability_col).fill = bad_fill
+
+    # Plan zapisu - wszystkie listy wierszy juz policzone, wiec grand_total
+    # (mianownik paska postepu) jest znany PRZED zapisem pierwszego arkusza.
+    sheet_plan = [
+        (SOURCE_TYPE_SHEET_NAMES[0][1], candidate_headers, candidates_by_source_type.get("category", []), True, None),
+        (SOURCE_TYPE_SHEET_NAMES[1][1], candidate_headers, candidates_by_source_type.get("brand", []), True, None),
+        (SOURCE_TYPE_SHEET_NAMES[2][1], candidate_headers, candidates_by_source_type.get("filtered_category", []), True, None),
+        ("L1_do_uzupelnienia", l1_headers, l1_rows, True, None),
+        ("L2_pod_L1_bez_siostr", l2_headers, l2_rows, False, None),
+        ("Pominiete_zbyt_glebokie", depth_headers, cut_by_depth_candidates, True, None),
+        ("Marka_wykluczona_generyczna", generic_headers, generic_rows, False, None),
+        ("Wszystkie_adresy_wejsciowe", input_url_headers, input_url_rows, False, _style_input_url_row),
+    ]
+    grand_total = sum(len(rows) for _, _, rows, _, _ in sheet_plan) or 1
+
+    wb = openpyxl.Workbook()
+    written_so_far = 0
+    for i, (sheet_name, headers, rows, color_flag, extra_style) in enumerate(sheet_plan):
+        ws = wb.active if i == 0 else wb.create_sheet(sheet_name)
+        if i == 0:
+            ws.title = sheet_name
+
+        on_progress = None
+        if progress:
+            offset = written_so_far
+
+            def on_progress(i_in_sheet, _offset=offset, _sheet=sheet_name):
+                progress(_sheet, _offset + i_in_sheet, grand_total)
+
+        _write_table(ws, headers, rows, color_target_by_rule=color_flag, extra_style=extra_style, on_progress=on_progress)
+        if sheet_name == "Pominiete_zbyt_glebokie" and not rows:
+            ws.append(["(brak - wszyscy kandydaci miesca sie w limicie glebokosci)"])
+        written_so_far += len(rows)
 
     ws3 = wb.create_sheet("Diagnostyka")
     ws3.append(["Metryka", "Wartosc"])
@@ -282,7 +317,11 @@ def build_review_workbook(
     return buf.getvalue()
 
 
-def build_contentful_matrix(candidate_rows: list[dict], max_links: int | None = None) -> bytes:
+def build_contentful_matrix(
+    candidate_rows: list[dict],
+    max_links: int | None = None,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> bytes:
     """
     candidate_rows: lista dictow z co najmniej kluczami Source_URL, Target_URL
     (opcjonalnie Poziom_roznica, Rule - uzywane do sortowania kolejnosci linkow
@@ -290,6 +329,9 @@ def build_contentful_matrix(candidate_rows: list[dict], max_links: int | None = 
     linking_engine.RULE_SORT_ORDER (kategoria_podrzedna, filtr_wlasny,
     kategoria_tego_samego_poziomu, filtr_tego_samego_poziomu, potem reszta),
     potem Poziom_roznica, na koniec Target_URL).
+
+    `progress(stage_label, rows_written_so_far, grand_total_rows)`: opcjonalny
+    callback do paska postepu, jak w build_review_workbook.
 
     Zwraca xlsx: pierwsza kolumna Source_URL, kolejne Link_1, Link_2, ...
     """
@@ -334,11 +376,18 @@ def build_contentful_matrix(candidate_rows: list[dict], max_links: int | None = 
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="4472C4")
-    for src, targets in sorted(rows_out, key=lambda x: x[0]):
+
+    rows_out_sorted = sorted(rows_out, key=lambda x: x[0])
+    total = len(rows_out_sorted)
+    report_every = max(total // 30, 1)
+    for i, (src, targets) in enumerate(rows_out_sorted, start=1):
         ws.append([src] + [t for t, _ in targets])
-        for i, (_, rule) in enumerate(targets):
+        row_num = i + 1  # naglowek to wiersz 1, i-ty wiersz danych to i+1
+        for j, (_, rule) in enumerate(targets):
             if rule:
-                ws.cell(row=ws.max_row, column=2 + i).fill = _tier_fill(rule)
+                ws.cell(row=row_num, column=2 + j).fill = _tier_fill(rule)
+        if progress and (i % report_every == 0 or i == total):
+            progress("Matryca Contentful", i, total)
     ws.freeze_panes = "A2"
     _autosize(ws)
 
