@@ -1,10 +1,14 @@
 """
 Budowanie plikow wyjsciowych (xlsx) z gotowych kandydatow do linkowania:
   1. Plik "do oceny" - kandydaci + arkusze pomocnicze do recznej weryfikacji:
-     Kandydaci_linkowania, L1_do_uzupelnienia, L2_pod_L1_bez_siostr,
-     Pominiete_zbyt_glebokie (kandydaci odcieci limitem max_level_diff),
-     Marka_wykluczona_generyczna (kategorie z generycznym leafem, np.
-     "Akcesoria", pominiete przy dopasowaniu marka 1-segmentowe), Diagnostyka.
+     Kandydaci_linkowania (BEZ kategorii L1 jako Source_URL - patrz nizej),
+     L1_do_uzupelnienia (WSZYSTKIE automatyczne propozycje, z kazdej reguly,
+     dla kategorii L1 jako Source_URL - przeniesione tu zamiast do
+     Kandydaci_linkowania, plus placeholder dla L1 bez zadnych propozycji),
+     L2_pod_L1_bez_siostr, Pominiete_zbyt_glebokie (kandydaci odcieci limitem
+     max_level_diff), Marka_wykluczona_generyczna (kategorie z generycznym
+     leafem, np. "Akcesoria", pominiete przy dopasowaniu marka 1-segmentowe),
+     Diagnostyka.
   2. Macierz "do Contentful" - jeden wiersz na zrodlowy URL, w kolejnych
      kolumnach URL-e, do ktorych ten URL ma linkowac.
 """
@@ -48,9 +52,11 @@ def build_review_workbook(
     cut_by_depth_candidates: list[dict] | None = None,
     max_level_diff: int | None = None,
     brand_generic_excluded: list | None = None,
+    l1_outbound_candidates: list[dict] | None = None,
 ) -> bytes:
     cut_by_depth_candidates = cut_by_depth_candidates or []
     brand_generic_excluded = brand_generic_excluded or []
+    l1_outbound_candidates = l1_outbound_candidates or []
 
     type_counts = Counter(p.url_type for p in pages)
     rule_counts = Counter()
@@ -70,22 +76,39 @@ def build_review_workbook(
     _write_table(ws1, headers, all_candidates)
 
     ws2 = wb.create_sheet("L1_do_uzupelnienia")
-    l1_headers = ["Source_URL", "Source_Type", "Source_Level", "Target_URL", "Target_Type", "Anchor", "Uwaga"]
-    l1_rows = [
-        {
-            "Source_URL": p.url,
-            "Source_Type": "category",
-            "Source_Level": p.level_label,
-            "Target_URL": "",
-            "Target_Type": "",
-            "Anchor": "",
-            "Uwaga": "BRAK REGULY - departament najwyzszego poziomu (brak rodzica w breadcrumbie), "
-                     "brak automatycznego 'sasiada tego samego poziomu' - wymaga recznego wskazania "
-                     "kategorii komplementarnych/podobnych (linkowanie 'w dol' od tej kategorii jest "
-                     "juz w zakladce Kandydaci_linkowania jak dla kazdej innej kategorii)",
-        }
-        for p in sorted(l1_categories, key=lambda x: x.url)
+    l1_headers = [
+        "Source_URL", "Target_URL", "Rule", "Source_Level",
+        "Source_Type", "Target_Type", "Target_Level",
+        "Poziom_roznica", "Anchor", "Uwaga",
     ]
+    NOTE_L1_HAS_CANDIDATES = (
+        "Kategoria L1 (departament najwyzszego poziomu) - ta propozycja NIE trafia automatycznie "
+        "do Kandydaci_linkowania (celowo - L1 wymaga recznej weryfikacji w calosci tutaj)."
+    )
+    NOTE_L1_NO_CANDIDATES = (
+        "BRAK KANDYDATOW - departament najwyzszego poziomu (brak rodzica w breadcrumbie) bez "
+        "zadnej automatycznej propozycji linkowania (ani w dol, ani do siostr - brak rodzica "
+        "wyklucza reguly oparte o wspolnego rodzica). Wymaga recznego wskazania kategorii "
+        "komplementarnych/podobnych."
+    )
+    l1_by_source: dict[str, list[dict]] = defaultdict(list)
+    for c in l1_outbound_candidates:
+        l1_by_source[c["Source_URL"]].append(c)
+
+    l1_rows = []
+    for p in sorted(l1_categories, key=lambda x: x.url):
+        items = l1_by_source.get(p.url, [])
+        if not items:
+            l1_rows.append({
+                "Source_URL": p.url, "Target_URL": "", "Rule": "", "Source_Level": p.level_label,
+                "Source_Type": "category", "Target_Type": "", "Target_Level": "",
+                "Poziom_roznica": "", "Anchor": "", "Uwaga": NOTE_L1_NO_CANDIDATES,
+            })
+        else:
+            for c in items:
+                row = dict(c)
+                row["Uwaga"] = NOTE_L1_HAS_CANDIDATES
+                l1_rows.append(row)
     _write_table(ws2, l1_headers, l1_rows)
 
     ws2b = wb.create_sheet("L2_pod_L1_bez_siostr")
@@ -152,6 +175,7 @@ def build_review_workbook(
     diag_rows += [
         ("", ""),
         ("Kategorie L1 (brak automatycznych sasiadow tego samego poziomu)", len(l1_categories)),
+        ("Propozycje z Source_URL = kategoria L1 (przeniesione do L1_do_uzupelnienia)", len(l1_outbound_candidates)),
         ("Kategorie L2 pod L1 (brak automatycznych 'siostr' - szeroki dzial)", len(l2_under_l1_no_siblings)),
         ("Strony filtrowane bez dopasowanej kategorii bazowej po breadcrumbie", len(no_base_found)),
         ("", ""),

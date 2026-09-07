@@ -4,7 +4,17 @@ crawl "Internal HTML" (eksport Screaming Frog, xlsx albo csv).
 
 Wszystko oparte o pandas/openpyxl - zaden z parserow nie zaklada konkretnej
 nazwy kolumny "na sztywno", tylko probuje rozpoznac najbardziej prawdopodobna
-kolumne (Address/URL, Status Code, Indexability, H1, Breadcrumb_*).
+kolumne (Original Url/Address/URL, Status Code, Indexability, H1, Breadcrumb_*).
+
+Kolumna URL: "Original Url" ma PIERWSZENSTWO przed "Address" (patrz
+URL_COLUMN_CANDIDATES). W eksportach Screaming Frog z List Mode "Address" bywa
+zdekodowana (np. polskie znaki w wartosci parametru filtra: "Bia%C5%82y" ->
+"Biały"), podczas gdy "Original Url" zachowuje dokladnie taki zapis (URL-encoded),
+w jakim URL zostal podany na wejsciu. Jesli listy Kategorie/Filtry/Marki
+zawieraja URL-e w formie zakodowanej (typowe dla sitemap), dopasowanie po
+Address (zdekodowanym) po prostu nie trafi - strona zniknie z analizy mimo ze
+jest w crawlu. Z tego samego powodu listy Kategorie/Filtry/Marki, jesli
+generowane z eksportu Screaming Frog, tez powinny brac kolumne "Original Url".
 """
 
 from __future__ import annotations
@@ -21,7 +31,7 @@ except ImportError:  # pragma: no cover
     requests = None
 
 
-URL_COLUMN_CANDIDATES = ["address", "url", "final url", "page url", "loc"]
+URL_COLUMN_CANDIDATES = ["original url", "address", "url", "final url", "page url", "loc"]
 STATUS_COLUMN_CANDIDATES = ["status code", "status_code", "statuscode", "http status"]
 INDEXABILITY_COLUMN_CANDIDATES = ["indexability"]
 H1_COLUMN_PREFIXES = ["h1"]

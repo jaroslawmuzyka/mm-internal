@@ -19,7 +19,11 @@ struktura (kategorie / filtry-fasety / strony marek + breadcrumb).
      (przodkowie + biezaca strona jako ostatni element)
 2. **Typ kazdej strony** jest ustalany po przynaleznosci do listy
    Kategorie/Filtry/Marki - NIE po wzorcu URL-a. Dzieki temu narzedzie nie
-   jest zaszyte pod jedna platforme e-commerce.
+   jest zaszyte pod jedna platforme e-commerce. Wyjatek: strona zagniezdzona
+   w breadcrumbie pod URL-em z listy Marki (dowolny przodek) dziedziczy typ
+   "brand", nawet jesli sama nie jest wprost na tej liscie - typowy przypadek
+   to podstrona marka+kategoria (np. `brand/dafi/dzbanki-filtrujace`), ktorej
+   lista Marki nie wymienia osobno, bo wymienia tylko glowne strony marek.
 3. **Zaznaczasz wykluczenia** (3xx, 4xx, noindex), ustawiasz suwak **"Maksymalna
    roznica poziomow"** (domyslnie 1 - patrz sekcja Reguly ponizej) i klikasz
    "Uruchom analize".
@@ -50,6 +54,19 @@ Screaming Frog exportuje dokladnie takie):
 | `Breadcrumb_URL 1`, `Breadcrumb_URL 2`, ... | URL-e przodkow w breadcrumbie, w kolejnosci L1→Ln-1 |
 | `Breadcrumb_Name 1`, `Breadcrumb_Name 2`, ... | nazwy przodkow + biezacej strony jako ostatni element, w kolejnosci L1→Ln |
 
+**Original Url vs Address:** jesli plik ma obie kolumny (typowe dla eksportu
+Screaming Frog w **List Mode**), URL bierzemy z `Original Url`, nie z `Address`.
+`Address` bywa zdekodowana przez Screaming Frog (np. polski znak w wartosci
+parametru filtra: `?colorNominated=Bia%C5%82y` -> `?colorNominated=Biały`),
+podczas gdy `Original Url` zachowuje dokladnie taki zapis, w jakim URL zostal
+podany na wejsciu. Jesli listy Kategorie/Filtry/Marki maja URL-e w formie
+zakodowanej (typowe dla sitemap), dopasowanie po zdekodowanym `Address` po
+prostu nie trafi - strona milczaco zniknie z analizy mimo ze jest w crawlu.
+**Z tego samego powodu generuj listy Kategorie/Filtry/Marki tez z kolumny
+`Original Url`**, jesli budujesz je z eksportu Screaming Frog - inaczej ten
+sam problem wroci przez tylne drzwi (Internal HTML i listy będą zakodowane
+niespojnie ze soba).
+
 Breadcrumb pobiera sie w Screaming Frog przez **Custom Extraction (XPath)** -
 patrz `docs/screaming_frog_setup.md` (jesli dolaczony) po przykladowa
 konfiguracje; dla kazdej strony trzeba dopasowac XPath do jej struktury DOM.
@@ -68,6 +85,13 @@ mapowania przez osobny arkusz Main Category → Final URL).
   "koszykowy" dzial typu "Dom i Ogrod") - jego dzieci nie sa tematycznie
   spokrewnione mimo wspolnego rodzica. Takie kategorie trafiaja do
   `L2_pod_L1_bez_siostr` do recznej selekcji.
+- **kategoria_nadrzedna** - kazda kategoria na poziomie **L5 lub glebiej**
+  ZAWSZE linkuje w gore do swojego bezposredniego rodzica (dokladnie 1
+  poziom wyzej, `Poziom_roznica = -1`). Niezalezne od limitu "Maksymalna
+  roznica poziomow" - to nie jest reguła "w dol", nie podlega odcinaniu.
+  Cel: glebokie, waskie galezie drzewa (bez rodzenstwa) maja przynajmniej
+  jeden pewny automatyczny link. Prog `PARENT_LINK_MIN_LEVEL` (domyslnie 5)
+  w `linking_engine.py`.
 - **kategoria_podrzedna** - kazdy przodek z breadcrumba -> ta kategoria, na
   kazdym poziomie ponizej (nie tylko bezposrednie dzieci) - **ale tylko do
   limitu "Maksymalna roznica poziomow"** ustawionego suwakiem w UI (domyslnie
@@ -105,10 +129,21 @@ Excelu mozna to od razu przefiltrowac/posortowac.
 
 **Sortowanie wynikow:** najpierw `Source_URL` rosnaco (A -> Z), a w obrebie
 tego samego `Source_URL` wg priorytetu reguly: `kategoria_podrzedna` ->
-`filtr_wlasny` -> `kategoria_tego_samego_poziomu` -> `filtr_tego_samego_poziomu`
--> pozostale reguly. Dotyczy to zarowno arkusza `Kandydaci_linkowania` /
-`Pominiete_zbyt_glebokie`, jak i kolejnosci `Link_1, Link_2, ...` w macierzy
-Contentful (patrz `linking_engine.RULE_SORT_ORDER`).
+`filtr_wlasny` -> `marka_orientacyjna_1seg(_UWAGA_KOLIZJA)` ->
+`kategoria_tego_samego_poziomu` -> `filtr_tego_samego_poziomu` -> pozostale
+reguly (`marka_precyzyjna_2seg`, `filtr_podrzedny`, `kategoria_nadrzedna`).
+Dotyczy to zarowno arkusza `Kandydaci_linkowania` / `Pominiete_zbyt_glebokie`,
+jak i kolejnosci `Link_1, Link_2, ...` w macierzy Contentful (patrz
+`linking_engine.RULE_SORT_ORDER`).
+
+**Kategorie L1 (departament najwyzszego poziomu) nigdy nie wystepuja jako
+`Source_URL` w `Kandydaci_linkowania` ani w `Pominiete_zbyt_glebokie`** -
+wszystkie ich automatyczne propozycje, z kazdej reguly (nie tylko
+kategoria_podrzedna), sa przenoszone do arkusza `L1_do_uzupelnienia`. Chodzi
+o to, zeby L1 bylo w calosci recznie przegladane w jednym miejscu, zamiast
+mieszac sie z reszta kandydatow. L1 bez zadnych automatycznych propozycji
+(np. brak dzieci w breadcrumbie) tez sie tam pojawia, jako placeholder do
+recznego uzupelnienia.
 
 ## Kolejne fazy (do dopisania)
 

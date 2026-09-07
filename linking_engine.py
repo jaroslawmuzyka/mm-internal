@@ -12,6 +12,11 @@ Model danych:
     - Typ kazdego URL-a (category / filtered_category / brand) ustalany jest
       po przynaleznosci do odpowiedniej listy (Kategorie/Filtry/Marki), NIE po
       wzorcu URL-a - dzieki temu narzedzie dziala na dowolnej stronie e-commerce.
+      Wyjatek: strona zagniezdzona w breadcrumbie pod URL-em z listy Marki
+      (dowolny przodek, nie tylko bezposredni rodzic) dziedziczy typ "brand",
+      nawet jesli sama nie jest wprost na liscie Marki - typowy przypadek to
+      podstrona marka+kategoria (np. "brand/dafi/dzbanki-filtrujace"), ktorej
+      lista Marki nie wymienia osobno, bo wymienia tylko glowne strony marek.
 
 Reguly (patrz build_* funkcje nizej) zostaly wypracowane i zweryfikowane na
 realnych danych sklepu e-commerce:
@@ -42,13 +47,27 @@ realnych danych sklepu e-commerce:
       1-segmentowego (nie tylko oznaczone jako kolizja) - trafiaja do
       osobnej listy `brand_generic_excluded` zamiast do kandydatow. Dopasowanie
       2-segmentowe (precyzyjne) tych kategorii/marek nie dotyczy.
+    - kategoria_nadrzedna: kazda kategoria na poziomie >= PARENT_LINK_MIN_LEVEL
+      (domyslnie L5) ZAWSZE linkuje w gore do swojego bezposredniego rodzica
+      (dokladnie 1 poziom wyzej, Poziom_roznica = -1). Niezalezne od
+      `max_level_diff` - to nie jest reguła "w dol", nie podlega odcinaniu
+      limitem glebokosci. Cel: glebokie, waskie galezie drzewa (bez rodzenstwa)
+      zawsze maja przynajmniej jeden pewny automatyczny link.
 
-Sortowanie wynikow (all_candidates, cut_by_depth_candidates oraz kolejnosc
-Link_1/Link_2/... w macierzy Contentful - patrz export.build_contentful_matrix):
+Kategorie L1 (najwyzszy poziom, brak rodzica w breadcrumbie) sa CALKOWICIE
+wylaczone z `all_candidates` / `cut_by_depth_candidates` jako Source_URL,
+niezaleznie od reguly - wszystkie ich propozycje trafiaja do osobnej listy
+`l1_outbound_candidates` (arkusz L1_do_uzupelnienia), zeby L1 bylo w calosci
+recznie przegladane w jednym miejscu (patrz run_all_rules).
+
+Sortowanie wynikow (all_candidates, cut_by_depth_candidates, l1_outbound_candidates
+oraz kolejnosc Link_1/Link_2/... w macierzy Contentful - patrz
+export.build_contentful_matrix):
     1. Source_URL rosnaco (A -> Z)
     2. w obrebie tego samego Source_URL - priorytet reguly wg RULE_SORT_ORDER:
-       kategoria_podrzedna, filtr_wlasny, kategoria_tego_samego_poziomu,
-       filtr_tego_samego_poziomu, potem pozostale reguly (marka_*, filtr_podrzedny)
+       kategoria_podrzedna, filtr_wlasny, marka_orientacyjna_1seg(_UWAGA_KOLIZJA),
+       kategoria_tego_samego_poziomu, filtr_tego_samego_poziomu, potem pozostale
+       reguly (marka_precyzyjna_2seg, filtr_podrzedny, kategoria_nadrzedna)
     3. Target_URL rosnaco (tiebreaker dla determinizmu)
 """
 
@@ -145,21 +164,29 @@ def build_pages(
         if not url:
             continue
 
+        breadcrumb_urls = tuple(r.get("breadcrumb_urls") or ())
+
         if url in category_urls:
             url_type = "category"
         elif url in filtry_urls:
             url_type = "filtered_category"
         elif url in marka_urls:
             url_type = "brand"
+        elif any(ancestor in marka_urls for ancestor in breadcrumb_urls):
+            # Podstrona zagniezdzona pod znana marka (np. marka + kategoria
+            # produktowa: "brand/dafi/dzbanki-filtrujace"), ktorej sama lista
+            # Marki nie wymienia wprost - odziedzicza typ "brand" po przodku,
+            # zeby tez brala udzial w dopasowaniu kategoria<->marka.
+            url_type = "brand"
         else:
-            continue  # URL spoza wszystkich list wejsciowych - pomijamy
+            continue  # URL spoza wszystkich list wejsciowych (i bez przodka z listy Marki) - pomijamy
 
         row = PageRow(
             url=url,
             status_code=r.get("status_code"),
             indexability=r.get("indexability"),
             h1=r.get("h1"),
-            breadcrumb_urls=tuple(r.get("breadcrumb_urls") or ()),
+            breadcrumb_urls=breadcrumb_urls,
             breadcrumb_names=tuple(r.get("breadcrumb_names") or ()),
             url_type=url_type,
         )
@@ -215,6 +242,33 @@ def build_category_hierarchy_candidates(
             candidates.append(_candidate(ancestor, descendant, "kategoria_podrzedna"))
 
     return candidates, l1_categories, l2_under_l1_no_siblings
+
+
+# Od tego poziomu wzwyz kategoria ZAWSZE musi linkowac w gore do bezposredniego
+# rodzica (o 1 poziom wyzej) - patrz build_category_parent_link_candidates.
+# Glebokie kategorie (L5+) czesto nie maja siostr (waskie, koncowe galezie
+# drzewa) i bez tej reguly moglyby nie dostac ZADNEGO automatycznego linku.
+PARENT_LINK_MIN_LEVEL = 5
+
+
+def build_category_parent_link_candidates(
+    pages: list[PageRow], min_level: int = PARENT_LINK_MIN_LEVEL
+) -> list[dict]:
+    """
+    Kazda kategoria na poziomie >= `min_level` linkuje do swojego bezposredniego
+    rodzica (Poziom_roznica = -1). Niezalezne od `max_level_diff` (to link "w
+    gore" o dokladnie 1 poziom, nie podlega limitowi glebokosci dla regul "w dol").
+    """
+    page_by_url = {p.url: p for p in pages}
+    candidates = []
+    for p in pages:
+        if p.url_type != "category" or p.level < min_level or p.direct_parent_url is None:
+            continue
+        parent = page_by_url.get(p.direct_parent_url)
+        if parent is None or parent.url_type != "category":
+            continue
+        candidates.append(_candidate(p, parent, "kategoria_nadrzedna"))
+    return candidates
 
 
 # --------------------------------------------------------------------------
@@ -383,6 +437,8 @@ def merge_candidates(raw_candidates: list[dict]) -> list[dict]:
 RULE_SORT_ORDER = [
     "kategoria_podrzedna",
     "filtr_wlasny",
+    "marka_orientacyjna_1seg",
+    "marka_orientacyjna_1seg_UWAGA_KOLIZJA",
     "kategoria_tego_samego_poziomu",
     "filtr_tego_samego_poziomu",
 ]
@@ -416,6 +472,13 @@ def _split_by_depth_limit(candidates: list[dict], max_level_diff: int) -> tuple[
     return within, cut
 
 
+def _extract_l1_sourced(candidates: list[dict], l1_urls: set) -> tuple[list[dict], list[dict]]:
+    """Rozdziela kandydatow na (reszta, ci ktorych Source_URL to kategoria L1)."""
+    l1_part = [c for c in candidates if c["Source_URL"] in l1_urls]
+    rest = [c for c in candidates if c["Source_URL"] not in l1_urls]
+    return rest, l1_part
+
+
 def run_all_rules(pages: list[PageRow], max_level_diff: int = 1) -> dict:
     """
     Uruchamia wszystkie reguly i zwraca slownik z surowymi/pomocniczymi wynikami.
@@ -424,30 +487,44 @@ def run_all_rules(pages: list[PageRow], max_level_diff: int = 1) -> dict:
     DEPTH_LIMITED_RULES. Kandydaci ponizej limitu nie trafiaja do
     `all_candidates`, tylko do `cut_by_depth_candidates` (osobny arkusz do
     recznej oceny, nic nie ginie bez sladu).
+
+    Kategorie L1 (departamenty najwyzszego poziomu) NIGDY nie wystepuja jako
+    Source_URL w `all_candidates` / `cut_by_depth_candidates` - wszystkie ich
+    automatyczne propozycje (z kazdej reguly) trafiaja do `l1_outbound_candidates`
+    (arkusz L1_do_uzupelnienia), zeby L1 bylo w calosci recznie przegladane
+    w jednym miejscu, a nie mieszalo sie z reszta kandydatow.
     """
     hierarchy_candidates, l1_categories, l2_under_l1_no_siblings = build_category_hierarchy_candidates(pages)
     collision_leaves = find_collision_leaves(pages)
     brand_candidates, brand_generic_excluded = build_category_brand_candidates(pages, collision_leaves)
     filter_candidates, no_base_found = build_category_filter_candidates(pages)
+    parent_link_candidates = build_category_parent_link_candidates(pages)
 
     hierarchy_within, hierarchy_cut = _split_by_depth_limit(hierarchy_candidates, max_level_diff)
     filter_within, filter_cut = _split_by_depth_limit(filter_candidates, max_level_diff)
 
-    raw = hierarchy_within + brand_candidates + filter_within
-    all_candidates = sorted(merge_candidates(raw), key=_candidate_sort_key)
-    cut_by_depth_candidates = sorted(
-        merge_candidates(hierarchy_cut + filter_cut),
-        key=_candidate_sort_key,
-    )
+    raw = hierarchy_within + brand_candidates + filter_within + parent_link_candidates
+    all_candidates = merge_candidates(raw)
+    cut_by_depth_candidates = merge_candidates(hierarchy_cut + filter_cut)
+
+    l1_urls = {p.url for p in l1_categories}
+    all_candidates, l1_from_all = _extract_l1_sourced(all_candidates, l1_urls)
+    cut_by_depth_candidates, l1_from_cut = _extract_l1_sourced(cut_by_depth_candidates, l1_urls)
+
+    all_candidates = sorted(all_candidates, key=_candidate_sort_key)
+    cut_by_depth_candidates = sorted(cut_by_depth_candidates, key=_candidate_sort_key)
+    l1_outbound_candidates = sorted(l1_from_all + l1_from_cut, key=_candidate_sort_key)
 
     return {
         "all_candidates": all_candidates,
         "cut_by_depth_candidates": cut_by_depth_candidates,
+        "l1_outbound_candidates": l1_outbound_candidates,
         "max_level_diff": max_level_diff,
         "hierarchy_candidates": hierarchy_candidates,
         "brand_candidates": brand_candidates,
         "brand_generic_excluded": brand_generic_excluded,
         "filter_candidates": filter_candidates,
+        "parent_link_candidates": parent_link_candidates,
         "l1_categories": l1_categories,
         "l2_under_l1_no_siblings": l2_under_l1_no_siblings,
         "no_base_found": no_base_found,

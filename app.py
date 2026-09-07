@@ -70,22 +70,33 @@ with st.expander("Jak to dziala? (kliknij, zeby rozwinac)", expanded=False):
         """
 1. **Kategorie / Filtry / Marki** - listy URL-i (xlsx z kolumna adresu, albo sitemapa XML).
    Typ kazdej strony jest ustalany po tym, na ktorej liscie sie znajduje - nie po wzorcu URL-a,
-   wiec narzedzie dziala na dowolnej stronie e-commerce.
+   wiec narzedzie dziala na dowolnej stronie e-commerce. Wyjatek: strona zagniezdzona pod URL-em
+   z listy Marki (dowolny przodek w breadcrumbie) dziedziczy typ "brand", nawet jesli sama nie
+   jest wprost na tej liscie (typowy przypadek: podstrona marka+kategoria).
 2. **Internal HTML** - eksport crawlera (np. Screaming Frog) z kolumnami: adres, status code,
    indexability, H1 oraz breadcrumb wyciagniety Custom Extraction (`Breadcrumb_URL 1..N`,
    `Breadcrumb_Name 1..N`, gdzie ostatnia kolumna Breadcrumb_Name to nazwa biezacej strony).
+   Kolumna adresu: jesli plik ma zarowno `Original Url` jak i `Address` (typowe dla eksportu
+   List Mode), bierzemy `Original Url` - `Address` bywa zdekodowana (np. polskie znaki w
+   parametrze filtra), co psuje dopasowanie do list Kategorie/Filtry/Marki.
 3. Zaznaczasz wykluczenia (3xx / 4xx / noindex) i klikasz **Uruchom analize**.
 4. Dostajesz dwa pliki: pelna liste kandydatow do oceny oraz gotowa macierz do wgrania w Contentful.
 
 **Reguly:** kategoria → kategoria (ten sam poziom + wszystko ponizej w drzewie, ale tylko do
-limitu "Maksymalna roznica poziomow" ponizej - patrz suwak w sekcji 2), kategoria → filtr
-(dopasowanie po identycznym breadcrumbie strony z parametrem, ten sam limit glebokosci dla
-filtr_podrzedny), kategoria → marka (dopasowanie po 1 lub 2 ostatnich segmentach nazwy w
-breadcrumbie; kategorie/marki z w pelni generycznym ostatnim segmentem, np. "Akcesoria", sa
-calkowicie wykluczone z dopasowania 1-segmentowego - trafiaja do arkusza
-Marka_wykluczona_generyczna zamiast do kandydatow).
+limitu "Maksymalna roznica poziomow" ponizej - patrz suwak w sekcji 2; dodatkowo kategorie L5+
+ZAWSZE linkuja w gore do bezposredniego rodzica), kategoria → filtr (dopasowanie po identycznym
+breadcrumbie strony z parametrem, ten sam limit glebokosci dla filtr_podrzedny), kategoria →
+marka (dopasowanie po 1 lub 2 ostatnich segmentach nazwy w breadcrumbie; kategorie/marki z w
+pelni generycznym ostatnim segmentem, np. "Akcesoria", sa calkowicie wykluczone z dopasowania
+1-segmentowego - trafiaja do arkusza Marka_wykluczona_generyczna zamiast do kandydatow).
+Kolejnosc w wynikach: najpierw Source_URL A→Z, potem priorytet reguly (kategoria_podrzedna →
+filtr_wlasny → marka_orientacyjna_1seg → kategoria_tego_samego_poziomu → filtr_tego_samego_poziomu
+→ pozostale).
 
 **Co trafia do osobnych arkuszy zamiast do glownej listy kandydatow:**
+- `L1_do_uzupelnienia` - kategorie L1 (najwyzszy poziom) NIGDY nie wystepuja jako Source_URL w
+  Kandydaci_linkowania - wszystkie ich automatyczne propozycje (z kazdej reguly) trafiaja tutaj,
+  do jednego miejsca recznej weryfikacji.
 - `Pominiete_zbyt_glebokie` - kandydaci kategoria_podrzedna/filtr_podrzedny odcieci limitem
   roznicy poziomow (nic nie ginie, tylko wymaga recznej decyzji, jesli chcesz je jednak dodac).
 - `Marka_wykluczona_generyczna` - kategorie z generycznym ostatnim segmentem breadcrumba (np.
@@ -196,6 +207,10 @@ if run_clicked:
             "Kategorie wykluczone z marki (nazwa generyczna)",
             len(result["brand_generic_excluded"]),
         )
+        st.metric(
+            "Propozycje z L1 (przeniesione do arkusza L1_do_uzupelnienia)",
+            len(result["l1_outbound_candidates"]),
+        )
 
         rule_counts = pd.Series(
             [r for c in all_candidates for r in c["Rule"].split(" + ")]
@@ -214,6 +229,7 @@ if run_clicked:
             cut_by_depth_candidates=result["cut_by_depth_candidates"],
             max_level_diff=result["max_level_diff"],
             brand_generic_excluded=result["brand_generic_excluded"],
+            l1_outbound_candidates=result["l1_outbound_candidates"],
         )
         contentful_bytes = build_contentful_matrix(all_candidates)
 
