@@ -47,12 +47,44 @@ realnych danych sklepu e-commerce:
       1-segmentowego (nie tylko oznaczone jako kolizja) - trafiaja do
       osobnej listy `brand_generic_excluded` zamiast do kandydatow. Dopasowanie
       2-segmentowe (precyzyjne) tych kategorii/marek nie dotyczy.
-    - kategoria_nadrzedna: kazda kategoria na poziomie >= PARENT_LINK_MIN_LEVEL
-      (domyslnie L5) ZAWSZE linkuje w gore do swojego bezposredniego rodzica
-      (dokladnie 1 poziom wyzej, Poziom_roznica = -1). Niezalezne od
-      `max_level_diff` - to nie jest reguła "w dol", nie podlega odcinaniu
-      limitem glebokosci. Cel: glebokie, waskie galezie drzewa (bez rodzenstwa)
-      zawsze maja przynajmniej jeden pewny automatyczny link.
+    - kategoria_nadrzedna / filtr_nadrzedny: kazda kategoria na poziomie >=
+      PARENT_LINK_MIN_LEVEL (domyslnie L5) ZAWSZE linkuje w gore do swojego
+      bezposredniego rodzica (dokladnie 1 poziom wyzej, Poziom_roznica = -1),
+      ORAZ do wszystkich filtrow nalezacych do tego rodzica (filtered_category
+      o identycznym breadcrumbie co rodzic). Niezalezne od `max_level_diff` -
+      to nie sa reguly "w dol", nie podlegaja odcinaniu limitem glebokosci.
+      Cel: glebokie, waskie galezie drzewa (bez rodzenstwa) zawsze maja
+      przynajmniej jeden pewny automatyczny link. `kategoria_nadrzedna` NIE
+      ma odwrotnosci (bylby to duplikat kategoria_podrzedna z limitem 1).
+
+    - ODWROCONE REGULY (marka/filtr jako Source_URL, nie tylko kategoria):
+      dla kazdego dopasowania kategoria->filtr (filtr_wlasny, filtr_tego_
+      samego_poziomu, filtr_podrzedny, filtr_nadrzedny) i kategoria->marka
+      (marka_precyzyjna_2seg, marka_orientacyjna_1seg(_UWAGA_KOLIZJA))
+      generowana jest OD RAZU, obok, odwrotnosc z dopiskiem `_odwrotnie` w
+      nazwie reguly (np. `filtr_wlasny_odwrotnie`, `marka_precyzyjna_2seg_odwrotnie`)
+      - to ten sam fakt, tylko marka/filtr jako Source_URL zamiast kategoria.
+      Dzieki temu strona marki/filtra tez moze linkowac do innych stron, nie
+      tylko byc targetem. Trafiaja do osobnych arkuszy w export.py (patrz
+      "Kandydaci do link. (marki)" / "(filtry)").
+    - marka_do_filtru / filtr_do_marki: marka <-> filtr NIE maja bezposredniego
+      dopasowania po nazwie/URL (nie parsujemy wartosci parametrow filtra) -
+      to dopasowanie TRANZYTYWNE przez wspolna kategorie bazowa: jesli marka
+      pasuje do kategorii C (marka_precyzyjna_2seg/marka_orientacyjna_1seg), a
+      C ma WLASNY filtr F (filtr_wlasny), to marka i F sa tez powiazane w obie
+      strony (patrz build_brand_filter_candidates).
+    - embedding_podobienstwo: DODATKOWA warstwa, niezalezna od breadcrumba -
+      cosine similarity miedzy embeddingami tresci strony (kolumna w Internal
+      HTML typu "Embeddings from page content" / "Extract embeddings" z
+      eksportu Screaming Frog, patrz io_utils). Dla kazdej strony z embeddingiem
+      dobiera `embedding_top_n` najbardziej podobnych innych stron z
+      embeddingiem, ale TYLKO pary, ktorych ZADNA inna regula (kategoria/filtr/
+      marka/nadrzedna, niezaleznie czy odcieta limitem glebokosci czy nie) juz
+      nie zaproponowala - nie duplikuje istniejacych rekomendacji, tylko
+      dorzuca cos nowego. Zawsze sortowana na samym koncu wynikow (patrz
+      RULE_SORT_ORDER / rule_sort_key) - to najmniej pewna, "ostatnia deska
+      ratunku" warstwa rekomendacji. Niesie dodatkowa kolumne `Podobienstwo`
+      (0-1, tylko dla tych wierszy).
 
 Kategorie L1 (najwyzszy poziom, brak rodzica w breadcrumbie) sa CALKOWICIE
 wylaczone z `all_candidates` / `cut_by_depth_candidates` jako Source_URL,
@@ -67,13 +99,16 @@ export.build_contentful_matrix):
     2. w obrebie tego samego Source_URL - priorytet reguly wg RULE_SORT_ORDER:
        kategoria_podrzedna, filtr_wlasny, marka_orientacyjna_1seg(_UWAGA_KOLIZJA),
        kategoria_tego_samego_poziomu, filtr_tego_samego_poziomu, potem pozostale
-       reguly (marka_precyzyjna_2seg, filtr_podrzedny, kategoria_nadrzedna)
+       reguly (marka_precyzyjna_2seg, filtr_podrzedny, kategoria_nadrzedna,
+       filtr_nadrzedny), na samym koncu zawsze embedding_podobienstwo
     3. Target_URL rosnaco (tiebreaker dla determinizmu)
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
+import numpy as np
+
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
@@ -91,6 +126,7 @@ class PageRow:
     breadcrumb_urls: tuple      # przodkowie, w kolejnosci (L1..Ln-1)
     breadcrumb_names: tuple     # przodkowie + biezaca strona, w kolejnosci (L1..Ln)
     url_type: str                # category / filtered_category / brand / other
+    embedding: tuple = ()         # wektor embeddingu tresci strony (opcjonalny, patrz io_utils)
 
     @property
     def level(self) -> int:
@@ -151,7 +187,8 @@ def build_pages(
     """
     internal_html_rows: lista dictow z kluczami (co najmniej):
         "url", "status_code", "indexability", "h1",
-        "breadcrumb_urls" (tuple), "breadcrumb_names" (tuple)
+        "breadcrumb_urls" (tuple), "breadcrumb_names" (tuple),
+        opcjonalnie "embedding" (tuple floatow - patrz io_utils, build_embedding_candidates)
     Zwraca liste PageRow, TYLKO dla URL-i ktore:
       - sa w co najmniej jednej z list (Kategorie/Filtry/Marki)
       - przechodza filtr eligibility (status/indexability wg checkboxow)
@@ -189,6 +226,7 @@ def build_pages(
             breadcrumb_urls=breadcrumb_urls,
             breadcrumb_names=tuple(r.get("breadcrumb_names") or ()),
             url_type=url_type,
+            embedding=tuple(r.get("embedding") or ()),
         )
         existing = seen.get(url)
         if existing is None or row.level > existing.level:
@@ -255,11 +293,23 @@ def build_category_parent_link_candidates(
     pages: list[PageRow], min_level: int = PARENT_LINK_MIN_LEVEL
 ) -> list[dict]:
     """
-    Kazda kategoria na poziomie >= `min_level` linkuje do swojego bezposredniego
-    rodzica (Poziom_roznica = -1). Niezalezne od `max_level_diff` (to link "w
-    gore" o dokladnie 1 poziom, nie podlega limitowi glebokosci dla regul "w dol").
+    Kazda kategoria na poziomie >= `min_level` linkuje w gore do swojego
+    bezposredniego rodzica (kategoria_nadrzedna, Poziom_roznica = -1) ORAZ do
+    wszystkich filtrow nalezacych do tego rodzica - filtered_category o
+    identycznym breadcrumbie co rodzic, ten sam mechanizm dopasowania co w
+    build_category_filter_candidates (filtr_nadrzedny + odwrotnosc
+    filtr_nadrzedny_odwrotnie: ten sam filtr rodzica linkuje z powrotem do
+    tej kategorii-dziecka). Niezalezne od `max_level_diff` (to link "w gore"
+    o dokladnie 1 poziom, nie podlega limitowi glebokosci dla regul "w dol").
+    `kategoria_nadrzedna` NIE ma odwrotnosci - to bylby po prostu duplikat
+    kategoria_podrzedna z Poziom_roznica ograniczonym do 1.
     """
     page_by_url = {p.url: p for p in pages}
+    filters_by_names: dict[tuple, list[PageRow]] = defaultdict(list)
+    for p in pages:
+        if p.url_type == "filtered_category":
+            filters_by_names[p.breadcrumb_names].append(p)
+
     candidates = []
     for p in pages:
         if p.url_type != "category" or p.level < min_level or p.direct_parent_url is None:
@@ -268,6 +318,9 @@ def build_category_parent_link_candidates(
         if parent is None or parent.url_type != "category":
             continue
         candidates.append(_candidate(p, parent, "kategoria_nadrzedna"))
+        for f in filters_by_names.get(parent.breadcrumb_names, []):
+            candidates.append(_candidate(p, f, "filtr_nadrzedny"))
+            candidates.append(_candidate(f, p, "filtr_nadrzedny_odwrotnie"))
     return candidates
 
 
@@ -320,6 +373,11 @@ def build_category_brand_candidates(
     i marki, ktorych ostatni segment breadcrumba jest na tej liscie, sa
     calkowicie pomijane przy dopasowaniu 1-segmentowym (nie trafiaja nawet do
     indeksu po stronie marki, ani nie sa sprawdzane po stronie kategorii).
+
+    Dla kazdego dopasowania kategoria->marka generowana jest TEZ odwrotnosc
+    marka->kategoria (`_odwrotnie` w nazwie reguly, np. `marka_precyzyjna_2seg_odwrotnie`)
+    - marka jako Source_URL, zeby strona marki mogla linkowac do pasujacych
+    kategorii (patrz arkusz "Kandydaci do link. (marki)" w export.py).
     """
     if collision_leaves is None:
         collision_leaves = find_collision_leaves(pages) or KNOWN_COLLISION_LEAVES_DEFAULT
@@ -345,6 +403,7 @@ def build_category_brand_candidates(
     for c in categories_2:
         for b in idx2.get(c.breadcrumb_names[-2:], []):
             candidates.append(_candidate(c, b, "marka_precyzyjna_2seg"))
+            candidates.append(_candidate(b, c, "marka_precyzyjna_2seg_odwrotnie"))
 
     idx1: dict[str, list[PageRow]] = defaultdict(list)
     for b in brands_1:
@@ -358,6 +417,7 @@ def build_category_brand_candidates(
         )
         for b in idx1.get(leaf, []):
             candidates.append(_candidate(c, b, rule))
+            candidates.append(_candidate(b, c, rule + "_odwrotnie"))
 
     return candidates, generic_excluded_categories
 
@@ -367,6 +427,13 @@ def build_category_brand_candidates(
 # --------------------------------------------------------------------------
 
 def build_category_filter_candidates(pages: list[PageRow]) -> tuple[list[dict], list[str]]:
+    """
+    filtr_wlasny / filtr_tego_samego_poziomu / filtr_podrzedny (kategoria ->
+    filtr) - kazda ma tez odwrotnosc wygenerowana od razu obok
+    (`_odwrotnie` w nazwie, filtr -> kategoria), zeby strona z filtrem mogla
+    linkowac z powrotem do kategorii (patrz arkusz "Kandydaci do link.
+    (filtry)" w export.py).
+    """
     page_by_url = {p.url: p for p in pages}
     categories = [p for p in pages if p.url_type == "category"]
 
@@ -397,6 +464,7 @@ def build_category_filter_candidates(pages: list[PageRow]) -> tuple[list[dict], 
             continue
 
         candidates.append(_candidate(base, f, "filtr_wlasny"))
+        candidates.append(_candidate(f, base, "filtr_wlasny_odwrotnie"))
 
         parent = page_by_url.get(base.direct_parent_url) if base.direct_parent_url else None
         if parent is not None and parent.level != 1:
@@ -404,14 +472,164 @@ def build_category_filter_candidates(pages: list[PageRow]) -> tuple[list[dict], 
                 if sibling.url == base.url:
                     continue
                 candidates.append(_candidate(sibling, f, "filtr_tego_samego_poziomu"))
+                candidates.append(_candidate(f, sibling, "filtr_tego_samego_poziomu_odwrotnie"))
 
         for ancestor_url in base.breadcrumb_urls:
             ancestor = page_by_url.get(ancestor_url)
             if ancestor is None or ancestor.url_type != "category":
                 continue
             candidates.append(_candidate(ancestor, f, "filtr_podrzedny"))
+            candidates.append(_candidate(f, ancestor, "filtr_podrzedny_odwrotnie"))
 
     return candidates, no_base_found
+
+
+# --------------------------------------------------------------------------
+# Reguła C-bis: marka <-> filtr, przez wspolna kategorie bazowa
+# --------------------------------------------------------------------------
+
+def build_brand_filter_candidates(
+    pages: list[PageRow], brand_candidates: list[dict]
+) -> list[dict]:
+    """
+    marka_do_filtru / filtr_do_marki: jesli marka jest dopasowana do kategorii
+    (marka_precyzyjna_2seg / marka_orientacyjna_1seg - patrz `brand_candidates`
+    z build_category_brand_candidates), a ta sama kategoria ma WLASNY filtr
+    (identyczny breadcrumb - ten sam mechanizm co filtr_wlasny), to marka i
+    ten filtr sa tez ze soba powiazane w obie strony. Typowy przypadek: strona
+    marki "Philips" <-> filtr "Czajniki elektryczne, marka Philips" tej samej
+    kategorii "Czajniki elektryczne".
+
+    Nie ma bezposredniego dopasowania marka<->filtr po nazwie/URL (w modelu
+    danych nie parsujemy wartosci parametrow filtra) - to dopasowanie
+    TRANZYTYWNE przez wspolna kategorie bazowa, stad wymaga juz policzonych
+    `brand_candidates` (Source=kategoria, Target=marka).
+
+    `brand_candidates` (patrz build_category_brand_candidates) zawiera JUZ
+    obie kierunki (kategoria->marka i marka->kategoria_odwrotnie) - bierzemy
+    TYLKO wpisy Source_Type == "category", zeby nie polegac przypadkiem na
+    tym, ze URL marki nigdy nie koliduje z URL kategorii.
+    """
+    page_by_url = {p.url: p for p in pages}
+    categories = [p for p in pages if p.url_type == "category"]
+    filtered = [p for p in pages if p.url_type == "filtered_category"]
+
+    cat_by_names: dict[tuple, PageRow] = {}
+    ambiguous_names = set()
+    for c in categories:
+        if c.breadcrumb_names in cat_by_names:
+            ambiguous_names.add(c.breadcrumb_names)
+        else:
+            cat_by_names[c.breadcrumb_names] = c
+    for names in ambiguous_names:
+        cat_by_names.pop(names, None)
+
+    filters_by_cat_url: dict[str, list[PageRow]] = defaultdict(list)
+    for f in filtered:
+        base = cat_by_names.get(f.breadcrumb_names)
+        if base is not None:
+            filters_by_cat_url[base.url].append(f)
+
+    candidates = []
+    seen_pairs = set()
+    for bc in brand_candidates:
+        if bc["Source_Type"] != "category":
+            continue
+        cat_url, brand_url = bc["Source_URL"], bc["Target_URL"]
+        brand_page = page_by_url.get(brand_url)
+        if brand_page is None:
+            continue
+        for f in filters_by_cat_url.get(cat_url, []):
+            key = (brand_url, f.url)
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            candidates.append(_candidate(brand_page, f, "marka_do_filtru"))
+            candidates.append(_candidate(f, brand_page, "filtr_do_marki"))
+
+    return candidates
+
+
+# --------------------------------------------------------------------------
+# Reguła D: podobienstwo tresci (embeddingi) - dodatkowa warstwa "na koniec"
+# --------------------------------------------------------------------------
+
+EMBEDDING_RULE = "embedding_podobienstwo"
+EMBEDDING_TOP_N_DEFAULT = 5
+EMBEDDING_TOP_N_MAX = 10  # twardy limit - nie wiecej niz 10 propozycji z tej warstwy per strona
+
+
+def build_embedding_candidates(
+    pages: list[PageRow],
+    excluded_pairs: set,
+    top_n: int = EMBEDDING_TOP_N_DEFAULT,
+) -> tuple[list[dict], list[str]]:
+    """
+    Dodatkowa warstwa rekomendacji oparta o cosine similarity miedzy
+    embeddingami tresci stron (kolumna "embedding" na PageRow - patrz
+    io_utils.read_internal_html_file). Niezalezna od breadcrumba/typu strony -
+    dziala na WSZYSTKICH stronach ktore maja embedding, niezaleznie czy to
+    kategoria, filtr czy marka.
+
+    Dla kazdej strony z poprawnym embeddingiem wybiera `top_n` (twardy limit
+    EMBEDDING_TOP_N_MAX = 10, niezaleznie co przekazano) najbardziej podobnych
+    innych stron z embeddingiem, POMIJAJAC:
+      - autolinkowanie (source == target)
+      - pary juz obecne w `excluded_pairs` (Source_URL, Target_URL) - czyli te,
+        ktore maja juz rekomendacje z ktorejkolwiek innej reguly (kategoria/
+        filtr/marka/nadrzedna), NIEZALEZNIE czy zostaly odciete limitem
+        glebokosci czy nie. Dzieki temu ta warstwa tylko DOKLADA nowe
+        propozycje, nigdy nie duplikuje tego, co juz jest gdzie indziej.
+
+    Strony bez uzytecznego embeddingu (brak kolumny, blad parsowania, albo
+    dlugosc wektora inna niz najczestsza w danych - nie da sie ich policzyc
+    macierzowo razem z reszta) trafiaja do drugiej wartosci zwracanej,
+    do wglado w Diagnostyce.
+
+    Zwraca (kandydaci, urle_pominiete_brak_lub_zly_embedding).
+    """
+    top_n = min(top_n, EMBEDDING_TOP_N_MAX)
+    candidates: list[dict] = []
+    if top_n <= 0:
+        return candidates, [p.url for p in pages if not p.embedding]
+
+    with_embedding = [p for p in pages if p.embedding]
+    skipped = [p.url for p in pages if not p.embedding]
+
+    if len(with_embedding) < 2:
+        return candidates, skipped + [p.url for p in with_embedding]
+
+    dim_counts = Counter(len(p.embedding) for p in with_embedding)
+    common_dim = dim_counts.most_common(1)[0][0]
+    usable = [p for p in with_embedding if len(p.embedding) == common_dim]
+    skipped += [p.url for p in with_embedding if len(p.embedding) != common_dim]
+
+    if len(usable) < 2:
+        return candidates, skipped + [p.url for p in usable]
+
+    vecs = np.array([p.embedding for p in usable], dtype=float)
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+    norms[norms == 0] = 1
+    normalized = vecs / norms
+    similarity = normalized @ normalized.T
+
+    for i, source in enumerate(usable):
+        order = np.argsort(similarity[i])[::-1]
+        picked = 0
+        for j in order:
+            if picked >= top_n:
+                break
+            if j == i:
+                continue
+            target = usable[j]
+            if (source.url, target.url) in excluded_pairs:
+                continue
+            c = _candidate(source, target, EMBEDDING_RULE)
+            c["Podobienstwo"] = round(float(similarity[i, j]), 4)
+            candidates.append(c)
+            picked += 1
+
+    return candidates, skipped
 
 
 # --------------------------------------------------------------------------
@@ -446,10 +664,57 @@ RULE_SORT_ORDER = [
 
 def rule_sort_key(rule: str) -> int:
     """Rule moze byc scalone z >1 reguly ('regulaA + regulaB') - liczy sie
-    najwyzszy priorytet (najnizszy indeks) wsrod scalonych regul."""
+    najwyzszy priorytet (najnizszy indeks) wsrod scalonych regul.
+    `embedding_podobienstwo` zawsze ostatnia (patrz build_embedding_candidates -
+    z definicji nigdy nie laczy sie z inna regula, bo takie pary sa wykluczone
+    juz na etapie budowania kandydatow embeddingowych)."""
+    if rule == EMBEDDING_RULE:
+        return len(RULE_SORT_ORDER) + 1
     sub_rules = rule.split(" + ")
     ranks = [RULE_SORT_ORDER.index(r) for r in sub_rules if r in RULE_SORT_ORDER]
     return min(ranks) if ranks else len(RULE_SORT_ORDER)
+
+
+# Poziomy "pewnosci" linku (do kolorowania Target_URL w exporcie - patrz
+# export.py) - INNA os niz RULE_SORT_ORDER (ktora ustala tylko kolejnosc
+# WYSWIETLANIA, nie jakosc dopasowania). Tier 0 = najpewniejsze (dokladne
+# dopasowanie strukturalne po breadcrumbie), tier 3 = najmniej pewne (czysto
+# statystyczne podobienstwo tresci, bez potwierdzenia strukturalnego).
+RULE_CONFIDENCE_TIERS = [
+    {  # tier 0 - najpewniejsze: dokladne dopasowanie 1:1 po breadcrumbie
+        # (kazda regula "_odwrotnie" ma ten sam tier co jej oryginal - to
+        # dokladnie ten sam fakt, tylko widziany z drugiej strony)
+        "kategoria_podrzedna", "filtr_wlasny", "filtr_wlasny_odwrotnie",
+        "kategoria_nadrzedna", "filtr_nadrzedny", "filtr_nadrzedny_odwrotnie",
+        "marka_precyzyjna_2seg", "marka_precyzyjna_2seg_odwrotnie",
+    },
+    {  # tier 1 - pewne, ale mniej bezposrednie (siostry, dopasowanie po nazwie,
+        # dopasowanie tranzytywne marka<->filtr przez wspolna kategorie)
+        "kategoria_tego_samego_poziomu", "filtr_tego_samego_poziomu",
+        "filtr_tego_samego_poziomu_odwrotnie", "filtr_podrzedny",
+        "filtr_podrzedny_odwrotnie", "marka_orientacyjna_1seg",
+        "marka_orientacyjna_1seg_odwrotnie", "marka_do_filtru", "filtr_do_marki",
+    },
+    {  # tier 2 - wymaga uwagi: jawnie oznaczone ryzyko kolizji nazw
+        "marka_orientacyjna_1seg_UWAGA_KOLIZJA",
+        "marka_orientacyjna_1seg_UWAGA_KOLIZJA_odwrotnie",
+    },
+    {  # tier 3 - najmniej pewne: czysto statystyczne podobienstwo tresci
+        EMBEDDING_RULE,
+    },
+]
+
+
+def rule_confidence_tier(rule: str) -> int:
+    """Rule moze byc scalone z >1 reguly - liczy sie NAJLEPSZY (najnizszy)
+    tier wsrod scalonych regul, bo kazde dodatkowe potwierdzenie tylko
+    zwieksza pewnosc danej pary. Nieznana regula -> najgorszy tier (ostroznie)."""
+    sub_rules = rule.split(" + ")
+    tiers = [
+        i for i, tier_set in enumerate(RULE_CONFIDENCE_TIERS)
+        if any(r in tier_set for r in sub_rules)
+    ]
+    return min(tiers) if tiers else len(RULE_CONFIDENCE_TIERS) - 1
 
 
 def _candidate_sort_key(c: dict) -> tuple:
@@ -479,7 +744,33 @@ def _extract_l1_sourced(candidates: list[dict], l1_urls: set) -> tuple[list[dict
     return rest, l1_part
 
 
-def run_all_rules(pages: list[PageRow], max_level_diff: int = 1) -> dict:
+def _strip_anchor_suffix(candidates: list[dict], suffix: str) -> list[dict]:
+    """
+    Usuwa `suffix` z konca kolumny Anchor (typowy przypadek: strona ma H1
+    zakonczone stalym dopiskiem marki/sklepu, np. "... w [Nazwa Sklepu]",
+    ktory nie powinien trafiac do linku wewnetrznego jako anchor). Sufiks NIE
+    jest zaszyty na sztywno w kodzie - podajesz go w UI (patrz app.py), zeby
+    nazwa sklepu nie musiala nigdzie pojawiac sie w publicznym repo.
+    Brak `suffix` (pusty string) = brak zmiany.
+    """
+    if not suffix:
+        return candidates
+    out = []
+    for c in candidates:
+        anchor = c.get("Anchor")
+        if isinstance(anchor, str) and anchor.endswith(suffix):
+            c = dict(c)
+            c["Anchor"] = anchor[: -len(suffix)].rstrip()
+        out.append(c)
+    return out
+
+
+def run_all_rules(
+    pages: list[PageRow],
+    max_level_diff: int = 1,
+    embedding_top_n: int = EMBEDDING_TOP_N_DEFAULT,
+    anchor_suffix_to_strip: str = "",
+) -> dict:
     """
     Uruchamia wszystkie reguly i zwraca slownik z surowymi/pomocniczymi wynikami.
     `max_level_diff`: maksymalna Poziom_roznica (Target_Level - Source_Level)
@@ -488,22 +779,42 @@ def run_all_rules(pages: list[PageRow], max_level_diff: int = 1) -> dict:
     `all_candidates`, tylko do `cut_by_depth_candidates` (osobny arkusz do
     recznej oceny, nic nie ginie bez sladu).
 
+    `embedding_top_n`: ile najbardziej podobnych stron (cosine similarity na
+    embeddingach) dobrac per strona w warstwie embedding_podobienstwo - patrz
+    build_embedding_candidates. `0` wylacza ta warstwe calkowicie.
+
+    `anchor_suffix_to_strip`: opcjonalny sufiks usuwany z konca kazdego Anchora
+    (patrz _strip_anchor_suffix) - np. stale dopisywana nazwa sklepu w H1.
+
     Kategorie L1 (departamenty najwyzszego poziomu) NIGDY nie wystepuja jako
     Source_URL w `all_candidates` / `cut_by_depth_candidates` - wszystkie ich
-    automatyczne propozycje (z kazdej reguly) trafiaja do `l1_outbound_candidates`
-    (arkusz L1_do_uzupelnienia), zeby L1 bylo w calosci recznie przegladane
-    w jednym miejscu, a nie mieszalo sie z reszta kandydatow.
+    automatyczne propozycje (z kazdej reguly, LACZNIE z embedding_podobienstwo)
+    trafiaja do `l1_outbound_candidates` (arkusz L1_do_uzupelnienia), zeby L1
+    bylo w calosci recznie przegladane w jednym miejscu, a nie mieszalo sie
+    z reszta kandydatow.
     """
     hierarchy_candidates, l1_categories, l2_under_l1_no_siblings = build_category_hierarchy_candidates(pages)
     collision_leaves = find_collision_leaves(pages)
     brand_candidates, brand_generic_excluded = build_category_brand_candidates(pages, collision_leaves)
     filter_candidates, no_base_found = build_category_filter_candidates(pages)
     parent_link_candidates = build_category_parent_link_candidates(pages)
+    brand_filter_candidates = build_brand_filter_candidates(pages, brand_candidates)
 
     hierarchy_within, hierarchy_cut = _split_by_depth_limit(hierarchy_candidates, max_level_diff)
     filter_within, filter_cut = _split_by_depth_limit(filter_candidates, max_level_diff)
 
-    raw = hierarchy_within + brand_candidates + filter_within + parent_link_candidates
+    structural_raw = (
+        hierarchy_within + brand_candidates + filter_within
+        + parent_link_candidates + brand_filter_candidates
+    )
+    already_covered_pairs = {
+        (c["Source_URL"], c["Target_URL"]) for c in structural_raw + hierarchy_cut + filter_cut
+    }
+    embedding_candidates, embedding_skipped = build_embedding_candidates(
+        pages, already_covered_pairs, top_n=embedding_top_n
+    )
+
+    raw = structural_raw + embedding_candidates
     all_candidates = merge_candidates(raw)
     cut_by_depth_candidates = merge_candidates(hierarchy_cut + filter_cut)
 
@@ -515,6 +826,10 @@ def run_all_rules(pages: list[PageRow], max_level_diff: int = 1) -> dict:
     cut_by_depth_candidates = sorted(cut_by_depth_candidates, key=_candidate_sort_key)
     l1_outbound_candidates = sorted(l1_from_all + l1_from_cut, key=_candidate_sort_key)
 
+    all_candidates = _strip_anchor_suffix(all_candidates, anchor_suffix_to_strip)
+    cut_by_depth_candidates = _strip_anchor_suffix(cut_by_depth_candidates, anchor_suffix_to_strip)
+    l1_outbound_candidates = _strip_anchor_suffix(l1_outbound_candidates, anchor_suffix_to_strip)
+
     return {
         "all_candidates": all_candidates,
         "cut_by_depth_candidates": cut_by_depth_candidates,
@@ -525,6 +840,10 @@ def run_all_rules(pages: list[PageRow], max_level_diff: int = 1) -> dict:
         "brand_generic_excluded": brand_generic_excluded,
         "filter_candidates": filter_candidates,
         "parent_link_candidates": parent_link_candidates,
+        "brand_filter_candidates": brand_filter_candidates,
+        "embedding_candidates": embedding_candidates,
+        "embedding_skipped": embedding_skipped,
+        "embedding_top_n": embedding_top_n,
         "l1_categories": l1_categories,
         "l2_under_l1_no_siblings": l2_under_l1_no_siblings,
         "no_base_found": no_base_found,

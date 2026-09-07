@@ -4,7 +4,8 @@ marka + filtr) na podstawie breadcrumba z crawla.
 
 Wgrywasz 4 pliki (Kategorie / Filtry / Marki / Internal HTML), zaznaczasz
 wykluczenia, klikasz "Uruchom analize" i dostajesz dwa pliki xlsx:
-  1. do oceny (pelna lista kandydatow + arkusze pomocnicze)
+  1. do oceny (kandydaci rozbici na 3 zeszyty wg Source_Type - kategorie/
+     marki/filtry - plus arkusze pomocnicze i audyt wgranych adresow)
   2. gotowa macierz do wgrania w Contentful (Source_URL + kolumny Link_N)
 """
 
@@ -15,7 +16,7 @@ import streamlit as st
 
 from linking_engine import build_pages, run_all_rules
 from io_utils import read_url_list_file, read_internal_html_file
-from export import build_review_workbook, build_contentful_matrix
+from export import build_review_workbook, build_contentful_matrix, SOURCE_TYPE_SHEET_NAMES
 
 
 st.set_page_config(page_title="Chmura linkow - linkowanie wewnetrzne", page_icon="🔗", layout="wide")
@@ -28,6 +29,20 @@ def _configured_password() -> str | None:
         return st.secrets.get("password")
     except Exception:
         return None
+
+
+def _configured_anchor_suffix() -> str:
+    """
+    Domyslna wartosc pola 'Sufiks do usuniecia z Anchor' - opcjonalnie z Secrets
+    (klucz `anchor_suffix_to_strip`), zeby nazwa sklepu/marki nie musiala byc
+    zaszyta na sztywno w kodzie (ktory jest w publicznym repo). Mozna tez po
+    prostu wpisac ja recznie w polu w UI za kazdym razem - to jest tylko
+    wygodny domyslny prefill.
+    """
+    try:
+        return st.secrets.get("anchor_suffix_to_strip") or ""
+    except Exception:
+        return ""
 
 
 def _password_entered() -> None:
@@ -61,8 +76,8 @@ if not check_password():
 
 st.title("🔗 Chmura linkow - generator linkowania wewnetrznego")
 st.caption(
-    "Kategoria → kategoria + marka + filtr, na podstawie breadcrumba z crawla. "
-    "Kolejne kierunki (filtr→kategoria/marka, marka→kategoria/filtr) mozna dodac tym samym schematem."
+    "Kategoria ↔ kategoria + marka + filtr, na podstawie breadcrumba z crawla - linkowanie dziala "
+    "w obie strony (marka i filtr tez linkuja do innych stron, nie tylko sa targetem)."
 )
 
 with st.expander("Jak to dziala? (kliknij, zeby rozwinac)", expanded=False):
@@ -76,31 +91,154 @@ with st.expander("Jak to dziala? (kliknij, zeby rozwinac)", expanded=False):
 2. **Internal HTML** - eksport crawlera (np. Screaming Frog) z kolumnami: adres, status code,
    indexability, H1 oraz breadcrumb wyciagniety Custom Extraction (`Breadcrumb_URL 1..N`,
    `Breadcrumb_Name 1..N`, gdzie ostatnia kolumna Breadcrumb_Name to nazwa biezacej strony).
+   Szczegolowa instrukcja konfiguracji: zakladka **"Konfiguracja Screaming Frog"** ponizej.
    Kolumna adresu: jesli plik ma zarowno `Original Url` jak i `Address` (typowe dla eksportu
    List Mode), bierzemy `Original Url` - `Address` bywa zdekodowana (np. polskie znaki w
-   parametrze filtra), co psuje dopasowanie do list Kategorie/Filtry/Marki.
-3. Zaznaczasz wykluczenia (3xx / 4xx / noindex) i klikasz **Uruchom analize**.
-4. Dostajesz dwa pliki: pelna liste kandydatow do oceny oraz gotowa macierz do wgrania w Contentful.
+   parametrze filtra), co psuje dopasowanie do list Kategorie/Filtry/Marki. Opcjonalnie: kolumna
+   `Extract embeddings from page content` zasila dodatkowa warstwe rekomendacji
+   embedding_podobienstwo (patrz nizej) - jej brak niczego nie psuje, narzedzie dziala normalnie
+   bez tej warstwy.
+3. Zaznaczasz wykluczenia (3xx / 4xx / noindex), ustawiasz suwaki i klikasz **Uruchom analize**.
+4. Dostajesz dwa pliki: pelna liste kandydatow do oceny (rozbita na **3 zeszyty wg tego, KTO
+   linkuje**: `Kandydaci do link. (kategorie)`, `(marki)`, `(filtry)` - patrz sekcja Reguly
+   ponizej) oraz gotowa macierz do wgrania w Contentful. Komorka `Target_URL` / `Link_N` jest
+   **kolorowana wg pewnosci dopasowania** (patrz "Skala pewnosci" na koncu tej listy) - w obu
+   plikach. Plik "do oceny" ma tez arkusz `Wszystkie_adresy_wejsciowe` - podglad wszystkich
+   URL-i wgranych w listach Kategorie/Filtry/Marki wraz z ich Status Code / Indexability
+   z Internal HTML (URL / Typ / Zrodlo-nazwa pliku / Status Code / Indexability), z czerwonym
+   podswietleniem status <> 200 i indexability <> "Indexable" - do szybkiego sprawdzenia, co
+   odpadlo z analizy i dlaczego.
 
-**Reguly:** kategoria → kategoria (ten sam poziom + wszystko ponizej w drzewie, ale tylko do
-limitu "Maksymalna roznica poziomow" ponizej - patrz suwak w sekcji 2; dodatkowo kategorie L5+
-ZAWSZE linkuja w gore do bezposredniego rodzica), kategoria → filtr (dopasowanie po identycznym
-breadcrumbie strony z parametrem, ten sam limit glebokosci dla filtr_podrzedny), kategoria →
-marka (dopasowanie po 1 lub 2 ostatnich segmentach nazwy w breadcrumbie; kategorie/marki z w
-pelni generycznym ostatnim segmentem, np. "Akcesoria", sa calkowicie wykluczone z dopasowania
-1-segmentowego - trafiaja do arkusza Marka_wykluczona_generyczna zamiast do kandydatow).
-Kolejnosc w wynikach: najpierw Source_URL A→Z, potem priorytet reguly (kategoria_podrzedna →
-filtr_wlasny → marka_orientacyjna_1seg → kategoria_tego_samego_poziomu → filtr_tego_samego_poziomu
-→ pozostale).
+### Reguly linkowania (dokladnie w tej kolejnosci trafiaja do wynikow)
 
-**Co trafia do osobnych arkuszy zamiast do glownej listy kandydatow:**
+1. **`kategoria_podrzedna`** - kazdy przodek kategorii z breadcrumba dostaje link do niej,
+   na kazdym poziomie ponizej (nie tylko bezposrednie dzieci) - ale tylko do limitu
+   **"Maksymalna roznica poziomow"** (suwak nizej, domyslnie 1 = tylko bezposrednie dzieci).
+   Kandydaci ponizej limitu nie znikaja - trafiaja do arkusza `Pominiete_zbyt_glebokie`.
+2. **`filtr_wlasny`** - kazda kategoria dostaje link do WLASNEJ strony z filtrem/fasetem
+   (dopasowanej po identycznym breadcrumbie - parametr URL nie zmienia breadcrumba w DOM).
+3. **`marka_orientacyjna_1seg`** (**`_UWAGA_KOLIZJA`** jesli nazwa koliduje w >1 dziale) -
+   kategoria dostaje link do marki, jesli ostatni segment nazwy w breadcrumbie jest identyczny
+   po obu stronach (np. kategoria ".../Golenie" -> marka ".../Philips/Golenie"). Kategorie/marki
+   z w pelni generycznym ostatnim segmentem (np. "Akcesoria") sa z tego calkowicie wykluczone -
+   trafiaja do arkusza `Marka_wykluczona_generyczna`.
+4. **`kategoria_tego_samego_poziomu`** - kategorie-siostry pod tym samym rodzicem w breadcrumbie
+   linkuja do siebie nawzajem. Pomijane, gdy rodzicem jest kategoria L1 (szeroki, "koszykowy"
+   dzial) - jego dzieci trafiaja zamiast tego do `L2_pod_L1_bez_siostr` do recznej selekcji.
+5. **`filtr_tego_samego_poziomu`** - jak wyzej, ale target to strona z filtrem siostrzanej
+   kategorii.
+6. **Pozostale reguly** (bez ustalonego priorytetu miedzy soba):
+   - `marka_precyzyjna_2seg` - dopasowanie kategorii do marki po **2** ostatnich segmentach
+     nazwy w breadcrumbie (bardzo male ryzyko falszywych trafien).
+   - `filtr_podrzedny` - jak `kategoria_podrzedna`, ale target to strona z filtrem (ten sam
+     limit "Maksymalna roznica poziomow").
+   - `kategoria_nadrzedna` / `filtr_nadrzedny` - kazda kategoria na poziomie **L5 lub glebiej**
+     ZAWSZE linkuje w gore do bezposredniego rodzica ORAZ do wszystkich jego filtrow
+     (niezalezne od limitu "Maksymalna roznica poziomow" - to jest link "w gore" o 1 poziom).
+7. **`embedding_podobienstwo`** (zawsze na samym koncu) - DODATKOWA warstwa, niezalezna od
+   breadcrumba: cosine similarity miedzy embeddingami tresci stron (jesli kolumna jest
+   dostepna w Internal HTML), max **10** najbardziej podobnych stron per strona (suwak nizej),
+   ale TYLKO pary, ktorych ZADNA z powyzszych regul jeszcze nie zaproponowala - nie duplikuje,
+   tylko dokdada. Kolumna `Podobienstwo` (0-1) jest wypelniona tylko dla tych wierszy.
+
+### Linkowanie odwrocone - marka i filtr tez SA zrodlem, nie tylko targetem
+
+Kazda z powyzszych regul kategoria→filtr i kategoria→marka ma OD RAZU wygenerowana
+odwrotnosc (dopisek `_odwrotnie` w nazwie reguly), zeby strona marki/filtra tez mogla
+linkowac do innych stron:
+- `filtr_wlasny_odwrotnie` / `filtr_tego_samego_poziomu_odwrotnie` / `filtr_podrzedny_odwrotnie`
+  / `filtr_nadrzedny_odwrotnie` - filtr linkuje z powrotem do kategorii (wlasnej bazowej,
+  siostrzanej, przodka, rodzica).
+- `marka_precyzyjna_2seg_odwrotnie` / `marka_orientacyjna_1seg_odwrotnie(_UWAGA_KOLIZJA_odwrotnie)`
+  - marka linkuje z powrotem do dopasowanej kategorii.
+- **`marka_do_filtru`** / **`filtr_do_marki`** - marka i filtr NIE maja bezposredniego
+  dopasowania po nazwie/URL (parametry filtra nie sa parsowane), wiec to dopasowanie
+  **tranzytywne**: jesli marka pasuje do kategorii C, a C ma WLASNY filtr F, to marka i F
+  sa tez ze soba powiazane w obie strony (typowy przypadek: strona marki "Philips" ↔ filtr
+  "Czajniki elektryczne marki Philips").
+
+Kazdy z tych kandydatow trafia do zeszytu zgodnego z Source_Type (patrz punkt 4 powyzej) -
+np. `filtr_wlasny_odwrotnie` (Source=filtr) laduje w `Kandydaci do link. (filtry)`.
+
+**Skala pewnosci (kolor komorki Target_URL / Link_N):**
+🟩 zielony = najpewniejsze (`kategoria_podrzedna`, `filtr_wlasny`, `kategoria_nadrzedna`,
+`filtr_nadrzedny`, `marka_precyzyjna_2seg` - dokladne dopasowanie strukturalne) →
+🟨 zolty = pewne, mniej bezposrednie (`kategoria_tego_samego_poziomu`, `filtr_tego_samego_poziomu`,
+`filtr_podrzedny`, `marka_orientacyjna_1seg`) →
+🟧 pomaranczowy = wymaga uwagi (`marka_orientacyjna_1seg_UWAGA_KOLIZJA` - jawnie oznaczona kolizja
+nazw) →
+🟥 czerwony = najmniej pewne (`embedding_podobienstwo` - czysto statystyczne podobienstwo tresci,
+warto zweryfikowac recznie).
+
+**Co trafia do osobnych arkuszy zamiast do zeszytow Kandydaci do link. (...):**
 - `L1_do_uzupelnienia` - kategorie L1 (najwyzszy poziom) NIGDY nie wystepuja jako Source_URL w
-  Kandydaci_linkowania - wszystkie ich automatyczne propozycje (z kazdej reguly) trafiaja tutaj,
-  do jednego miejsca recznej weryfikacji.
+  zadnym z 3 zeszytow kandydatow - wszystkie ich automatyczne propozycje (z kazdej reguly,
+  lacznie z embedding_podobienstwo) trafiaja tutaj, do jednego miejsca recznej weryfikacji.
 - `Pominiete_zbyt_glebokie` - kandydaci kategoria_podrzedna/filtr_podrzedny odcieci limitem
   roznicy poziomow (nic nie ginie, tylko wymaga recznej decyzji, jesli chcesz je jednak dodac).
 - `Marka_wykluczona_generyczna` - kategorie z generycznym ostatnim segmentem breadcrumba (np.
   "Akcesoria"), ktore nie dostaly automatycznej propozycji marki 1-segmentowej.
+- `Wszystkie_adresy_wejsciowe` - audyt: kazdy URL wgrany w listach Kategorie/Filtry/Marki
+  (kolumny URL / Typ / Zrodlo - nazwa wgranego pliku / Status Code / Indexability z
+  Internal HTML), niezaleznie czy ostatecznie zostal dopasowany do crawla - czerwone
+  podswietlenie na status <> 200 i indexability <> "Indexable". Do szybkiego sprawdzenia,
+  co dokladnie zostalo przeanalizowane i co odpadlo (i dlaczego).
+        """
+    )
+
+with st.expander("🕷️ Konfiguracja Screaming Frog (kliknij, zeby rozwinac)", expanded=False):
+    st.markdown(
+        """
+Jak skonfigurowac crawl w Screaming Frog, zeby eksport "Internal HTML" mial wszystkie
+kolumny, ktorych to narzedzie potrzebuje.
+
+**1. Tryb crawla:**
+- **Spider (zwykly crawl)** - jesli chcesz, zeby Screaming Frog sam odkryl wszystkie strony
+  przechodzac po linkach. Prostsze, ale fasety/filtry czesto sa zablokowane w robots.txt albo
+  nie majace zwyklych linkow `<a href>` (JS), wiec spider moze ich nie znalezc.
+- **List Mode** (Mode -> List) - wgrywasz gotowa liste URL-i (np. z sitemapy albo eksportu ze
+  sklepu) i Screaming Frog odwiedza TYLKO te adresy. Polecane, jesli masz pelna liste kategorii/
+  filtrow/marek z innego zrodla - gwarantuje, ze nic nie zostanie pominiete przez crawl budget
+  albo brak wewnetrznych linkow. W tym trybie w eksporcie pojawia sie kolumna **`Original Url`**
+  (dokladny URL, ktory wgrales) obok `Address` (URL po ewentualnych przekierowaniach/dekodowaniu)
+  - to narzedzie samo wybiera `Original Url`, jesli jest dostepna (patrz sekcja 2 powyzej).
+
+**2. Breadcrumb (Custom Extraction):**
+`Config -> Custom -> Extraction`. Dodaj **dwa** ekstraktory typu XPath:
+- Jeden zwracajacy WSZYSTKIE URL-e elementow breadcrumba naraz jako liste, np.
+  `//nav[contains(@class,"breadcrumb")]//a/@href` (dopasuj XPath do struktury DOM swojej
+  strony) - nazwij go np. `Breadcrumb_URL`. Screaming Frog sam ponumeruje wyniki w kolumnach
+  wyjsciowych (`Breadcrumb_URL 1`, `Breadcrumb_URL 2`, ...).
+- Drugi analogicznie dla nazw (tekst zamiast `href`), np.
+  `//nav[contains(@class,"breadcrumb")]//a/text() | //nav[contains(@class,"breadcrumb")]//span[last()]/text()`
+  - nazwij go `Breadcrumb_Name` (musi zawierac TEZ biezaca strone jako ostatni element, nie
+  tylko przodkow - stad dodatkowy warunek na ostatni element bez linku).
+- **Wazne zalozenie, na ktorym opiera sie regula filtr_wlasny/filtr_tego_samego_poziomu/
+  filtr_podrzedny:** strona z parametrem/fasetem (np. `?brand=PHILIPS`) musi miec **identyczny**
+  breadcrumb jak jej kategoria bazowa. Jesli Twoja strona zmienia breadcrumb dla stron
+  filtrowanych, te reguly nie zadzialaja poprawnie.
+
+**3. Embeddingi (opcjonalnie, dla warstwy embedding_podobienstwo):**
+`Config -> Custom -> Extraction`, dodaj ekstraktor typu **Custom JavaScript**, ktory:
+- pobiera tresc strony (np. glowny tekst/opis kategorii),
+- wywoluje API embeddingow (np. OpenAI `text-embedding-3-small` albo inny model),
+- zwraca wynik jako pojedynczy string z liczbami rozdzielonymi przecinkami, np.
+  `"0.0123,-0.0456,0.0789,..."` (nawiasy klamrowe/kwadratowe tez sa tolerowane).
+
+Nazwij ten ekstraktor **dokladnie** `Extract embeddings from page content` - narzedzie
+rozpoznaje TYLKO te jedna, konkretna nazwe kolumny (celowo, zeby nie wciagnac przypadkiem
+innej kolumny). Bez tego kroku narzedzie dziala normalnie, po prostu bez tej warstwy.
+
+**4. Eksport:**
+Po zakonczeniu crawla: zakladka **Internal** (filtr HTML) -> **Export** (albo
+`Bulk Export -> Web -> All`), format `.xlsx` lub `.csv`. Upewnij sie, ze w eksporcie sa
+kolumny: `Address`/`Original Url`, `Status Code`, `Indexability`, `H1-1`,
+`Breadcrumb_URL 1..N`, `Breadcrumb_Name 1..N` i (opcjonalnie) `Extract embeddings from page content`.
+
+**5. Noindex a filtry:**
+Fasety/filtry czesto maja `noindex, follow` (celowo, zeby nie rozdmuchiwac indeksu) - to NIE
+znaczy, ze nie warto do nich linkowac wewnetrznie. Jesli chcesz uwzglednic takie strony w
+analizie, odznacz checkbox "Nie uwzgledniaj noindex" w sekcji 2 ponizej.
         """
     )
 
@@ -138,6 +276,31 @@ max_level_diff = st.slider(
     ),
 )
 
+embedding_top_n = st.slider(
+    "Liczba propozycji z warstwy embedding_podobienstwo na strone (0 = wylacz, max 10)",
+    min_value=0,
+    max_value=10,
+    value=5,
+    help=(
+        "Dodatkowa warstwa rekomendacji oparta o podobienstwo tresci (cosine similarity "
+        "na embeddingach z kolumny 'Extract embeddings from page content' w Internal HTML). "
+        "Dziala TYLKO jesli taka kolumna jest w pliku. Dla kazdej strony dobiera N "
+        "najbardziej podobnych innych stron, ale POMIJA pary, ktore juz maja rekomendacje "
+        "z innej reguly - to czysto dodatkowa warstwa, zawsze na samym koncu wynikow."
+    ),
+)
+
+anchor_suffix_to_strip = st.text_input(
+    "Sufiks do usuniecia z konca Anchor (opcjonalnie)",
+    value=_configured_anchor_suffix(),
+    help=(
+        "Jesli H1 (a wiec i Anchor) na Twojej stronie konczy sie stalym dopiskiem "
+        "(np. nazwa sklepu/marki), wpisz go tutaj - zostanie obciety z konca kazdego "
+        "Anchora w wynikach. Domyslna wartosc mozna ustawic w Secrets (klucz "
+        "`anchor_suffix_to_strip`), zeby nie wpisywac za kazdym razem recznie."
+    ),
+)
+
 st.header("3. Analiza")
 run_clicked = st.button("▶️ Uruchom analize", type="primary")
 
@@ -170,6 +333,25 @@ if run_clicked:
             f"{len(marka_urls)} marek, {len(internal_html_rows)} wierszy z Internal HTML."
         )
 
+        # Audyt: wszystkie URL-e wgrane do narzedzia (listy Kategorie/Filtry/Marki),
+        # niezaleznie czy ostatecznie zostaly dopasowane do crawla - patrz arkusz
+        # Wszystkie_adresy_wejsciowe w pliku "do oceny". Status Code / Indexability
+        # brane z SUROWEGO Internal HTML (przed wykluczeniami 3xx/4xx/noindex) -
+        # to wlasnie pozwala zobaczyc, ktore adresy odpadly z analizy i dlaczego.
+        crawl_by_url = {r["url"]: r for r in internal_html_rows if r.get("url")}
+
+        def _crawl_status_indexability(url: str) -> dict:
+            row = crawl_by_url.get(url)
+            if row is None:
+                return {"Status Code": "", "Indexability": "(brak w Internal HTML)"}
+            return {"Status Code": row.get("status_code"), "Indexability": row.get("indexability")}
+
+        all_input_urls = (
+            [{"URL": u, "Typ": "kategoria", "Źródło": kategorie_file.name, **_crawl_status_indexability(u)} for u in category_urls]
+            + [{"URL": u, "Typ": "filtr", "Źródło": filtry_file.name, **_crawl_status_indexability(u)} for u in filtry_urls]
+            + [{"URL": u, "Typ": "marka", "Źródło": marki_file.name, **_crawl_status_indexability(u)} for u in marka_urls]
+        )
+
         with st.spinner("Budowanie kandydatow do linkowania..."):
             pages = build_pages(
                 internal_html_rows,
@@ -188,7 +370,12 @@ if run_clicked:
                 )
                 st.stop()
 
-            result = run_all_rules(pages, max_level_diff=max_level_diff)
+            result = run_all_rules(
+                pages,
+                max_level_diff=max_level_diff,
+                embedding_top_n=embedding_top_n,
+                anchor_suffix_to_strip=anchor_suffix_to_strip.strip(),
+            )
             all_candidates = result["all_candidates"]
 
         st.subheader("Podsumowanie")
@@ -207,10 +394,22 @@ if run_clicked:
             "Kategorie wykluczone z marki (nazwa generyczna)",
             len(result["brand_generic_excluded"]),
         )
-        st.metric(
+        m7, m8 = st.columns(2)
+        m7.metric(
             "Propozycje z L1 (przeniesione do arkusza L1_do_uzupelnienia)",
             len(result["l1_outbound_candidates"]),
         )
+        m8.metric(
+            "Nowe propozycje z warstwy embedding_podobienstwo",
+            len(result["embedding_candidates"]),
+        )
+
+        st.caption("Kandydaci do linkowania - rozbicie na 3 zeszyty wg Source_Type:")
+        mk1, mk2, mk3 = st.columns(3)
+        by_source_type = pd.Series([c["Source_Type"] for c in all_candidates]).value_counts()
+        mk1.metric("Kandydaci do link. (kategorie)", int(by_source_type.get("category", 0)))
+        mk2.metric("Kandydaci do link. (marki)", int(by_source_type.get("brand", 0)))
+        mk3.metric("Kandydaci do link. (filtry)", int(by_source_type.get("filtered_category", 0)))
 
         rule_counts = pd.Series(
             [r for c in all_candidates for r in c["Rule"].split(" + ")]
@@ -230,6 +429,9 @@ if run_clicked:
             max_level_diff=result["max_level_diff"],
             brand_generic_excluded=result["brand_generic_excluded"],
             l1_outbound_candidates=result["l1_outbound_candidates"],
+            embedding_top_n=result["embedding_top_n"],
+            embedding_skipped=result["embedding_skipped"],
+            all_input_urls=all_input_urls,
         )
         contentful_bytes = build_contentful_matrix(all_candidates)
 
@@ -258,28 +460,47 @@ if "review_bytes" in st.session_state:
 st.divider()
 with st.expander("Krok 2 (opcjonalnie): macierz Contentful z RECZNIE POPRAWIONEGO pliku"):
     st.markdown(
-        "Jesli po pobraniu pliku 'do oceny' recznie usunales/dodales wiersze w zakladce "
-        "**Kandydaci_linkowania**, wgraj tu poprawiony plik - macierz do Contentful zostanie "
-        "zbudowana TYLKO z tych wierszy, ktore w nim zostaly."
+        "Jesli po pobraniu pliku 'do oceny' recznie usunales/dodales wiersze w ktorejkolwiek "
+        "z zakladek **Kandydaci do link. (kategorie / marki / filtry)**, wgraj tu poprawiony "
+        "plik - macierz do Contentful zostanie zbudowana TYLKO z tych wierszy, ktore w nim "
+        "zostaly (ze wszystkich 3 zakladek naraz)."
     )
     edited_file = st.file_uploader(
-        "Poprawiony plik (zakladka Kandydaci_linkowania)", type=["xlsx"], key="edited"
+        "Poprawiony plik (zakladki Kandydaci do link. (...))", type=["xlsx"], key="edited"
     )
     if edited_file is not None:
-        try:
-            df = pd.read_excel(edited_file, sheet_name="Kandydaci_linkowania")
-        except Exception:
-            df = pd.read_excel(edited_file)
-        required_cols = {"Source_URL", "Target_URL"}
-        if not required_cols.issubset(set(df.columns)):
-            st.error(f"Plik musi zawierac kolumny: {', '.join(required_cols)}.")
-        else:
-            edited_rows = df.to_dict(orient="records")
-            edited_contentful_bytes = build_contentful_matrix(edited_rows)
-            st.success(f"Wczytano {len(edited_rows)} wierszy z poprawionego pliku.")
-            st.download_button(
-                "⬇️ Pobierz macierz Contentful (z poprawionego pliku)",
-                data=edited_contentful_bytes,
-                file_name="chmura_linkow_matryca_contentful_poprawiona.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        edited_rows = []
+        sheets_found = []
+        for _, sheet_name in SOURCE_TYPE_SHEET_NAMES:
+            try:
+                df = pd.read_excel(edited_file, sheet_name=sheet_name)
+            except Exception:
+                continue
+            sheets_found.append(sheet_name)
+            edited_rows.extend(df.to_dict(orient="records"))
+
+        if not sheets_found:
+            st.error(
+                "Nie znaleziono zadnej z zakladek 'Kandydaci do link. (...)' w tym pliku. "
+                "Upewnij sie, ze wgrywasz plik pobrany z tego narzedzia (ewentualnie recznie "
+                "poprawiony, ale z zachowanymi nazwami zakladek)."
             )
+        else:
+            required_cols = {"Source_URL", "Target_URL"}
+            missing_cols = [
+                r for r in edited_rows if not required_cols.issubset(r.keys())
+            ]
+            if missing_cols:
+                st.error(f"Kazda zakladka musi zawierac kolumny: {', '.join(required_cols)}.")
+            else:
+                edited_contentful_bytes = build_contentful_matrix(edited_rows)
+                st.success(
+                    f"Wczytano {len(edited_rows)} wierszy z {len(sheets_found)} zakladek "
+                    f"({', '.join(sheets_found)})."
+                )
+                st.download_button(
+                    "⬇️ Pobierz macierz Contentful (z poprawionego pliku)",
+                    data=edited_contentful_bytes,
+                    file_name="chmura_linkow_matryca_contentful_poprawiona.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )

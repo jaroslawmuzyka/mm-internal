@@ -15,11 +15,22 @@ zawieraja URL-e w formie zakodowanej (typowe dla sitemap), dopasowanie po
 Address (zdekodowanym) po prostu nie trafi - strona zniknie z analizy mimo ze
 jest w crawlu. Z tego samego powodu listy Kategorie/Filtry/Marki, jesli
 generowane z eksportu Screaming Frog, tez powinny brac kolumne "Original Url".
+
+Kolumna embeddingu (OPCJONALNA, patrz EMBEDDING_COLUMN_CANDIDATES): musi sie
+nazywac (dopasowanie nieczule na wielkosc liter/spacje) "Extract embeddings
+from page content" - CELOWO tylko ta jedna, konkretna kolumna, zeby nie
+wciagac przypadkiem innej kolumny zawierajacej slowo "embedding" o innym
+znaczeniu. Wartosc to string typu "0.12, -0.45, ..." (z lub bez nawiasow
+klamrowych), parsowany na tuple floatow. Zasila
+linking_engine.build_embedding_candidates (dodatkowa warstwa rekomendacji
+oparta o podobienstwo tresci). Brak tej kolumny nie przeszkadza w niczym
+innym - reszta narzedzia dziala normalnie, po prostu bez tej warstwy.
 """
 
 from __future__ import annotations
 
 import io
+import math
 import re
 import xml.etree.ElementTree as ET
 
@@ -37,6 +48,10 @@ INDEXABILITY_COLUMN_CANDIDATES = ["indexability"]
 H1_COLUMN_PREFIXES = ["h1"]
 BREADCRUMB_URL_PREFIX = "breadcrumb_url"
 BREADCRUMB_NAME_PREFIX = "breadcrumb_name"
+# Wylacznie ta jedna, konkretna kolumna (patrz docstring modulu) - dopasowanie
+# czesciowe w _find_column daje tolerancje na wielkosc liter / dodatkowe
+# spacje, ale NIE na inna nazwe. Kolumna OPCJONALNA.
+EMBEDDING_COLUMN_CANDIDATES = ["extract embeddings from page content"]
 
 
 def _norm(s: str) -> str:
@@ -60,6 +75,35 @@ def _find_column(columns: list[str], candidates: list[str]) -> str | None:
             if cand in nc:
                 return c
     return None
+
+
+def _parse_embedding(raw) -> tuple:
+    """
+    Konwertuje wartosc kolumny embeddingu (np. "[0.123, -0.456, ...]" albo
+    "0.123,-0.456,...") na tuple floatow. Zwraca () jesli puste/niepoprawne
+    (brak wartosci, blad parsowania, NaN/Inf w ktorejkolwiek liczbie) - taka
+    strona po prostu nie bierze udzialu w warstwie embedding_podobienstwo
+    (patrz linking_engine.build_embedding_candidates), reszta narzedzia
+    dziala normalnie dalej. Musi NIGDY nie rzucic wyjatku - crawl ze Screaming
+    Frog moze miec puste/dziwne wartosci w tej kolumnie dla dowolnego wiersza,
+    to nie moze wywalic calej analizy.
+    """
+    try:
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            return ()
+        s = str(raw).strip()
+        if not s or s.lower() == "nan":
+            return ()
+        s = s.strip("[]() '\"")
+        if not s:
+            return ()
+        parts = re.split(r"[,;\s]+", s)
+        values = tuple(float(p.strip(" '\"")) for p in parts if p.strip(" '\""))
+        if not values or not all(math.isfinite(v) for v in values):
+            return ()
+        return values
+    except (ValueError, TypeError, OverflowError):
+        return ()
 
 
 def _read_dataframe(uploaded_file) -> pd.DataFrame:
@@ -165,6 +209,7 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
     status_col = _find_column(columns, STATUS_COLUMN_CANDIDATES)
     indexability_col = _find_column(columns, INDEXABILITY_COLUMN_CANDIDATES)
     h1_col = _find_column(columns, H1_COLUMN_PREFIXES)
+    embedding_col = _find_column(columns, EMBEDDING_COLUMN_CANDIDATES)
 
     bc_url_cols = sorted(
         [c for c in columns if _norm(c).replace(" ", "_").startswith(BREADCRUMB_URL_PREFIX)],
@@ -208,6 +253,8 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
             str(r[c]).strip() for c in bc_name_cols if pd.notna(r.get(c)) and str(r[c]).strip()
         )
 
+        embedding = _parse_embedding(r.get(embedding_col)) if embedding_col else ()
+
         rows.append(
             {
                 "url": str(url).strip(),
@@ -216,6 +263,7 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
                 "h1": h1,
                 "breadcrumb_urls": bc_urls,
                 "breadcrumb_names": bc_names,
+                "embedding": embedding,
             }
         )
     return rows
