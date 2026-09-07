@@ -101,7 +101,9 @@ export.build_contentful_matrix):
        kategoria_tego_samego_poziomu, filtr_tego_samego_poziomu, potem pozostale
        reguly (marka_precyzyjna_2seg, filtr_podrzedny, kategoria_nadrzedna,
        filtr_nadrzedny), na samym koncu zawsze embedding_podobienstwo
-    3. Target_URL rosnaco (tiebreaker dla determinizmu)
+    3. dla wierszy embedding_podobienstwo - malejaco po Podobienstwo (najwyzszy
+       cosine similarity pierwszy); dla reszty regul bez wplywu (brak Podobienstwo)
+    4. Target_URL rosnaco (tiebreaker dla determinizmu)
 """
 
 from __future__ import annotations
@@ -676,30 +678,35 @@ def rule_sort_key(rule: str) -> int:
 
 
 # Poziomy "pewnosci" linku (do kolorowania Target_URL w exporcie - patrz
-# export.py) - INNA os niz RULE_SORT_ORDER (ktora ustala tylko kolejnosc
-# WYSWIETLANIA, nie jakosc dopasowania). Tier 0 = najpewniejsze (dokladne
-# dopasowanie strukturalne po breadcrumbie), tier 3 = najmniej pewne (czysto
-# statystyczne podobienstwo tresci, bez potwierdzenia strukturalnego).
+# export.py TIER_FILL_COLORS, indeks w tej liscie = indeks koloru) - INNA os
+# niz RULE_SORT_ORDER (ktora ustala tylko kolejnosc WYSWIETLANIA, nie jakosc
+# dopasowania). Tier 0 = najpewniejsze (ciemna zielen), tier 4 = najmniej
+# pewne (czerwony, czysto statystyczne podobienstwo tresci).
 RULE_CONFIDENCE_TIERS = [
-    {  # tier 0 - najpewniejsze: dokladne dopasowanie 1:1 po breadcrumbie
-        # (kazda regula "_odwrotnie" ma ten sam tier co jej oryginal - to
-        # dokladnie ten sam fakt, tylko widziany z drugiej strony)
+    {  # tier 0 (ciemna zielen) - najpewniejsze: dokladne dopasowanie 1:1 po
+        # breadcrumbie, oraz najsilniejsze dopasowania marki (2-seg i 1-seg
+        # bez kolizji). Kazda regula "_odwrotnie" ma ten sam tier co jej
+        # oryginal - to dokladnie ten sam fakt, tylko widziany z drugiej strony.
         "kategoria_podrzedna", "filtr_wlasny", "filtr_wlasny_odwrotnie",
         "kategoria_nadrzedna", "filtr_nadrzedny", "filtr_nadrzedny_odwrotnie",
         "marka_precyzyjna_2seg", "marka_precyzyjna_2seg_odwrotnie",
+        "marka_orientacyjna_1seg", "marka_orientacyjna_1seg_odwrotnie",
     },
-    {  # tier 1 - pewne, ale mniej bezposrednie (siostry, dopasowanie po nazwie,
-        # dopasowanie tranzytywne marka<->filtr przez wspolna kategorie)
-        "kategoria_tego_samego_poziomu", "filtr_tego_samego_poziomu",
-        "filtr_tego_samego_poziomu_odwrotnie", "filtr_podrzedny",
-        "filtr_podrzedny_odwrotnie", "marka_orientacyjna_1seg",
-        "marka_orientacyjna_1seg_odwrotnie", "marka_do_filtru", "filtr_do_marki",
+    {  # tier 1 (jasna zielen) - pewne: siostry-kategorie po wspolnym rodzicu
+        "kategoria_tego_samego_poziomu",
     },
-    {  # tier 2 - wymaga uwagi: jawnie oznaczone ryzyko kolizji nazw
+    {  # tier 2 (zolty) - pewne, ale mniej bezposrednie (dopasowanie
+        # tranzytywne marka<->filtr przez wspolna kategorie, filtr przodka)
+        "filtr_podrzedny", "filtr_podrzedny_odwrotnie",
+        "marka_do_filtru", "filtr_do_marki",
+    },
+    {  # tier 3 (pomaranczowy) - wymaga uwagi: jawnie oznaczone ryzyko kolizji
+        # nazw marki, oraz siostry-filtry (mniej pewne niz siostry-kategorie)
         "marka_orientacyjna_1seg_UWAGA_KOLIZJA",
         "marka_orientacyjna_1seg_UWAGA_KOLIZJA_odwrotnie",
+        "filtr_tego_samego_poziomu", "filtr_tego_samego_poziomu_odwrotnie",
     },
-    {  # tier 3 - najmniej pewne: czysto statystyczne podobienstwo tresci
+    {  # tier 4 (czerwony) - najmniej pewne: czysto statystyczne podobienstwo tresci
         EMBEDDING_RULE,
     },
 ]
@@ -718,7 +725,15 @@ def rule_confidence_tier(rule: str) -> int:
 
 
 def _candidate_sort_key(c: dict) -> tuple:
-    return (c["Source_URL"], rule_sort_key(c["Rule"]), c["Target_URL"])
+    """
+    W obrebie tego samego Source_URL i tej samej reguly - jesli wiersz ma
+    Podobienstwo (embedding_podobienstwo), sortuj malejaco po nim (najlepsze
+    dopasowanie pierwsze), zamiast alfabetycznie po Target_URL. Reszta regul
+    nie ma Podobienstwo (None) -> ranga 0, bez wplywu na ich kolejnosc.
+    """
+    podobienstwo = c.get("Podobienstwo")
+    podobienstwo_rank = -podobienstwo if isinstance(podobienstwo, (int, float)) else 0
+    return (c["Source_URL"], rule_sort_key(c["Rule"]), podobienstwo_rank, c["Target_URL"])
 
 
 # Reguly, do ktorych stosuje sie limit `max_level_diff` (patrz run_all_rules) -

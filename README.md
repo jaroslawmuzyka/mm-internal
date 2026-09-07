@@ -41,10 +41,10 @@ struktura (kategorie / filtry-fasety / strony marek + breadcrumb).
      `L2_pod_L1_bez_siostr`, `Pominiete_zbyt_glebokie`,
      `Marka_wykluczona_generyczna`, `Wszystkie_adresy_wejsciowe`, `Diagnostyka`)
      do recznej weryfikacji
-   - `chmura_linkow_matryca_contentful.xlsx` - gotowa macierz: pierwsza
-     kolumna `Source_URL`, kolejne `Link_1, Link_2, ...` z URL-ami do
-     zalinkowania (ze WSZYSTKICH 3 zeszytow naraz - kategorie, marki i filtry
-     jako Source_URL)
+   - `chmura_linkow_matryca_contentful.xlsx` - gotowa macierz, **tak samo
+     rozbita na 3 zeszyty wg Source_Type**: `Matryca Contentful (kategorie)`,
+     `(marki)`, `(filtry)`. W kazdym: pierwsza kolumna `Source_URL`, kolejne
+     `Link_1, Link_2, ...` z URL-ami do zalinkowania
 
    W **obu plikach** komorka `Target_URL` / `Link_N` jest kolorowana wg
    pewnosci dopasowania - patrz "Skala pewnosci" w sekcji Reguly ponizej.
@@ -221,10 +221,11 @@ wyswietlania, tu jakosc dopasowania):
 
 | Kolor | Tier | Reguly |
 |---|---|---|
-| 🟩 Zielony | najpewniejsze - dokladne dopasowanie 1:1 po breadcrumbie | `kategoria_podrzedna`, `filtr_wlasny(_odwrotnie)`, `kategoria_nadrzedna`, `filtr_nadrzedny(_odwrotnie)`, `marka_precyzyjna_2seg(_odwrotnie)` |
-| 🟨 Zolty | pewne, mniej bezposrednie (w tym dopasowanie tranzytywne) | `kategoria_tego_samego_poziomu`, `filtr_tego_samego_poziomu(_odwrotnie)`, `filtr_podrzedny(_odwrotnie)`, `marka_orientacyjna_1seg(_odwrotnie)`, `marka_do_filtru`, `filtr_do_marki` |
-| 🟧 Pomaranczowy | wymaga uwagi - jawnie oznaczona kolizja nazw | `marka_orientacyjna_1seg_UWAGA_KOLIZJA(_odwrotnie)` |
-| 🟥 Czerwony | najmniej pewne - czysto statystyczne podobienstwo tresci | `embedding_podobienstwo` |
+| 🟢 Ciemna zielen (`70AD47`) | najpewniejsze - dokladne dopasowanie 1:1 po breadcrumbie, oraz najsilniejsze dopasowania marki | `kategoria_podrzedna`, `filtr_wlasny(_odwrotnie)`, `kategoria_nadrzedna`, `filtr_nadrzedny(_odwrotnie)`, `marka_precyzyjna_2seg(_odwrotnie)`, `marka_orientacyjna_1seg(_odwrotnie)` |
+| 🟩 Jasna zielen (`C6EFCE`) | pewne - siostry po wspolnym rodzicu | `kategoria_tego_samego_poziomu` |
+| 🟨 Zolty (`FFEB9C`) | pewne, mniej bezposrednie (w tym dopasowanie tranzytywne) | `filtr_podrzedny(_odwrotnie)`, `marka_do_filtru`, `filtr_do_marki` |
+| 🟧 Pomaranczowy (`FCE4D6`) | wymaga uwagi - jawnie oznaczona kolizja nazw, oraz siostry-filtry | `marka_orientacyjna_1seg_UWAGA_KOLIZJA(_odwrotnie)`, `filtr_tego_samego_poziomu(_odwrotnie)` |
+| 🟥 Czerwony (`FFC7CE`) | najmniej pewne - czysto statystyczne podobienstwo tresci | `embedding_podobienstwo` |
 
 Reguly `_odwrotnie` maja ten sam tier co ich oryginal - to dokladnie ten sam
 fakt, tylko widziany z drugiej strony (marka/filtr jako Source zamiast
@@ -244,9 +245,12 @@ tego samego `Source_URL` wg priorytetu reguly: `kategoria_podrzedna` ->
 reguly (`marka_precyzyjna_2seg`, `filtr_podrzedny`, `kategoria_nadrzedna`,
 `filtr_nadrzedny`) -> **`embedding_podobienstwo` zawsze na samym koncu**
 (patrz sekcja Reguly powyzej - to najmniej pewna, "ostatnia deska ratunku"
-warstwa). Dotyczy to zarowno kazdego z 3 zeszytow `Kandydaci do link. (...)`
-/ `Pominiete_zbyt_glebokie`, jak i kolejnosci `Link_1, Link_2, ...` w
-macierzy Contentful (patrz `linking_engine.RULE_SORT_ORDER`).
+warstwa). W obrebie wierszy `embedding_podobienstwo` dla tego samego
+`Source_URL` - dodatkowo **malejaco po `Podobienstwo`** (najlepsze
+dopasowanie, czyli najwyzszy cosine similarity, zawsze pierwsze). Dotyczy to
+zarowno kazdego z 3 zeszytow `Kandydaci do link. (...)` / `Pominiete_zbyt_glebokie`,
+jak i kolejnosci `Link_1, Link_2, ...` w macierzy Contentful (patrz
+`linking_engine.RULE_SORT_ORDER` / `_candidate_sort_key`).
 
 **Kategorie L1 (departament najwyzszego poziomu) nigdy nie wystepuja jako
 `Source_URL` w zadnym z 3 zeszytow `Kandydaci do link. (...)` ani w

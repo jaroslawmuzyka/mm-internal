@@ -6,7 +6,8 @@ Wgrywasz 4 pliki (Kategorie / Filtry / Marki / Internal HTML), zaznaczasz
 wykluczenia, klikasz "Uruchom analize" i dostajesz dwa pliki xlsx:
   1. do oceny (kandydaci rozbici na 3 zeszyty wg Source_Type - kategorie/
      marki/filtry - plus arkusze pomocnicze i audyt wgranych adresow)
-  2. gotowa macierz do wgrania w Contentful (Source_URL + kolumny Link_N)
+  2. gotowa macierz do wgrania w Contentful (rowniez rozbita na 3 zeszyty wg
+     Source_Type - Source_URL + kolumny Link_N)
 """
 
 from __future__ import annotations
@@ -101,9 +102,10 @@ with st.expander("Jak to dziala? (kliknij, zeby rozwinac)", expanded=False):
 3. Zaznaczasz wykluczenia (3xx / 4xx / noindex), ustawiasz suwaki i klikasz **Uruchom analize**.
 4. Dostajesz dwa pliki: pelna liste kandydatow do oceny (rozbita na **3 zeszyty wg tego, KTO
    linkuje**: `Kandydaci do link. (kategorie)`, `(marki)`, `(filtry)` - patrz sekcja Reguly
-   ponizej) oraz gotowa macierz do wgrania w Contentful. Komorka `Target_URL` / `Link_N` jest
-   **kolorowana wg pewnosci dopasowania** (patrz "Skala pewnosci" na koncu tej listy) - w obu
-   plikach. Plik "do oceny" ma tez arkusz `Wszystkie_adresy_wejsciowe` - podglad wszystkich
+   ponizej) oraz gotowa macierz do wgrania w Contentful - **tak samo rozbita na 3 zeszyty**
+   (`Matryca Contentful (kategorie)` / `(marki)` / `(filtry)`). Komorka `Target_URL` / `Link_N`
+   jest **kolorowana wg pewnosci dopasowania** (patrz "Skala pewnosci" na koncu tej listy) - w
+   obu plikach. Plik "do oceny" ma tez arkusz `Wszystkie_adresy_wejsciowe` - podglad wszystkich
    URL-i wgranych w listach Kategorie/Filtry/Marki wraz z ich Status Code / Indexability
    z Internal HTML (URL / Typ / Zrodlo-nazwa pliku / Status Code / Indexability), z czerwonym
    podswietleniem status <> 200 i indexability <> "Indexable" - do szybkiego sprawdzenia, co
@@ -161,14 +163,19 @@ Kazdy z tych kandydatow trafia do zeszytu zgodnego z Source_Type (patrz punkt 4 
 np. `filtr_wlasny_odwrotnie` (Source=filtr) laduje w `Kandydaci do link. (filtry)`.
 
 **Skala pewnosci (kolor komorki Target_URL / Link_N):**
-🟩 zielony = najpewniejsze (`kategoria_podrzedna`, `filtr_wlasny`, `kategoria_nadrzedna`,
-`filtr_nadrzedny`, `marka_precyzyjna_2seg` - dokladne dopasowanie strukturalne) →
-🟨 zolty = pewne, mniej bezposrednie (`kategoria_tego_samego_poziomu`, `filtr_tego_samego_poziomu`,
-`filtr_podrzedny`, `marka_orientacyjna_1seg`) →
+🟢 ciemna zielen = najpewniejsze (`kategoria_podrzedna`, `filtr_wlasny`, `kategoria_nadrzedna`,
+`filtr_nadrzedny`, `marka_precyzyjna_2seg`, `marka_orientacyjna_1seg` - dokladne dopasowanie
+strukturalne, w tym najsilniejsze dopasowania marki) →
+🟩 jasna zielen = pewne (`kategoria_tego_samego_poziomu` - siostry po wspolnym rodzicu) →
+🟨 zolty = pewne, mniej bezposrednie (`filtr_podrzedny`, `marka_do_filtru`, `filtr_do_marki`) →
 🟧 pomaranczowy = wymaga uwagi (`marka_orientacyjna_1seg_UWAGA_KOLIZJA` - jawnie oznaczona kolizja
-nazw) →
+nazw, `filtr_tego_samego_poziomu` - siostry-filtry) →
 🟥 czerwony = najmniej pewne (`embedding_podobienstwo` - czysto statystyczne podobienstwo tresci,
 warto zweryfikowac recznie).
+
+Kazda regula `_odwrotnie` ma ten sam kolor co jej oryginal (to ten sam fakt, tylko widziany z
+drugiej strony). Jesli wiersz laczy >1 regule (np. `marka_precyzyjna_2seg + marka_orientacyjna_1seg`),
+liczy sie NAJLEPSZY (najpewniejszy) kolor wsrod nich.
 
 **Co trafia do osobnych arkuszy zamiast do zeszytow Kandydaci do link. (...):**
 - `L1_do_uzupelnienia` - kategorie L1 (najwyzszy poziom) NIGDY nie wystepuja jako Source_URL w
