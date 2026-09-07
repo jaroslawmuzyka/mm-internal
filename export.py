@@ -18,6 +18,8 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from linking_engine import rule_sort_key
+
 
 def _autosize(ws):
     for col_cells in ws.columns:
@@ -61,7 +63,7 @@ def build_review_workbook(
     ws1 = wb.active
     ws1.title = "Kandydaci_linkowania"
     headers = [
-        "Source_URL", "Target_URL", "Source_Level", "Rule",
+        "Source_URL", "Target_URL", "Rule", "Source_Level",
         "Source_Type", "Target_Type", "Target_Level",
         "Poziom_roznica", "Anchor",
     ]
@@ -107,7 +109,7 @@ def build_review_workbook(
 
     ws2c = wb.create_sheet("Pominiete_zbyt_glebokie")
     depth_headers = [
-        "Source_URL", "Target_URL", "Source_Level", "Rule",
+        "Source_URL", "Target_URL", "Rule", "Source_Level",
         "Source_Type", "Target_Type", "Target_Level",
         "Poziom_roznica", "Anchor",
     ]
@@ -180,8 +182,11 @@ def build_review_workbook(
 def build_contentful_matrix(candidate_rows: list[dict], max_links: int | None = None) -> bytes:
     """
     candidate_rows: lista dictow z co najmniej kluczami Source_URL, Target_URL
-    (opcjonalnie Poziom_roznica, Rule - uzywane tylko do sortowania kolejnosci
-    linkow w obrebie jednego zrodla).
+    (opcjonalnie Poziom_roznica, Rule - uzywane do sortowania kolejnosci linkow
+    w obrebie jednego zrodla: najpierw wg priorytetu reguly - patrz
+    linking_engine.RULE_SORT_ORDER (kategoria_podrzedna, filtr_wlasny,
+    kategoria_tego_samego_poziomu, filtr_tego_samego_poziomu, potem reszta),
+    potem Poziom_roznica, na koniec Target_URL).
 
     Zwraca xlsx: pierwsza kolumna Source_URL, kolejne Link_1, Link_2, ...
     """
@@ -195,8 +200,8 @@ def build_contentful_matrix(candidate_rows: list[dict], max_links: int | None = 
 
     def sort_key(r):
         return (
+            rule_sort_key(str(r.get("Rule") or "")),
             r.get("Poziom_roznica") if isinstance(r.get("Poziom_roznica"), (int, float)) else 0,
-            str(r.get("Rule") or ""),
             str(r.get("Target_URL") or ""),
         )
 

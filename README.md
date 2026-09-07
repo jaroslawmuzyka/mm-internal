@@ -103,6 +103,13 @@ Kazdy wiersz w wyniku ma kolumne `Poziom_roznica` (Target level − Source
 level: 0 = ten sam poziom, dodatnia = ile poziomow nizej jest target) - w
 Excelu mozna to od razu przefiltrowac/posortowac.
 
+**Sortowanie wynikow:** najpierw `Source_URL` rosnaco (A -> Z), a w obrebie
+tego samego `Source_URL` wg priorytetu reguly: `kategoria_podrzedna` ->
+`filtr_wlasny` -> `kategoria_tego_samego_poziomu` -> `filtr_tego_samego_poziomu`
+-> pozostale reguly. Dotyczy to zarowno arkusza `Kandydaci_linkowania` /
+`Pominiete_zbyt_glebokie`, jak i kolejnosci `Link_1, Link_2, ...` w macierzy
+Contentful (patrz `linking_engine.RULE_SORT_ORDER`).
+
 ## Kolejne fazy (do dopisania)
 
 Silnik (`linking_engine.py`) jest tak zbudowany, zeby dalo sie dopisac kolejne

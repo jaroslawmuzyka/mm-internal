@@ -42,6 +42,14 @@ realnych danych sklepu e-commerce:
       1-segmentowego (nie tylko oznaczone jako kolizja) - trafiaja do
       osobnej listy `brand_generic_excluded` zamiast do kandydatow. Dopasowanie
       2-segmentowe (precyzyjne) tych kategorii/marek nie dotyczy.
+
+Sortowanie wynikow (all_candidates, cut_by_depth_candidates oraz kolejnosc
+Link_1/Link_2/... w macierzy Contentful - patrz export.build_contentful_matrix):
+    1. Source_URL rosnaco (A -> Z)
+    2. w obrebie tego samego Source_URL - priorytet reguly wg RULE_SORT_ORDER:
+       kategoria_podrzedna, filtr_wlasny, kategoria_tego_samego_poziomu,
+       filtr_tego_samego_poziomu, potem pozostale reguly (marka_*, filtr_podrzedny)
+    3. Target_URL rosnaco (tiebreaker dla determinizmu)
 """
 
 from __future__ import annotations
@@ -98,8 +106,8 @@ def _candidate(source: PageRow, target: PageRow, rule: str) -> dict:
     return {
         "Source_URL": source.url,
         "Target_URL": target.url,
-        "Source_Level": source.level_label,
         "Rule": rule,
+        "Source_Level": source.level_label,
         "Source_Type": source.url_type,
         "Target_Type": target.url_type,
         "Target_Level": target.level_label,
@@ -369,6 +377,29 @@ def merge_candidates(raw_candidates: list[dict]) -> list[dict]:
     return list(merged.values())
 
 
+# Kolejnosc sortowania wynikow (w obrebie tego samego Source_URL) - patrz
+# _rule_sort_key. Reguly spoza tej listy (marka_*, filtr_podrzedny) ida na
+# koniec, w kolejnosci w jakiej i tak trafily do kandydatow.
+RULE_SORT_ORDER = [
+    "kategoria_podrzedna",
+    "filtr_wlasny",
+    "kategoria_tego_samego_poziomu",
+    "filtr_tego_samego_poziomu",
+]
+
+
+def rule_sort_key(rule: str) -> int:
+    """Rule moze byc scalone z >1 reguly ('regulaA + regulaB') - liczy sie
+    najwyzszy priorytet (najnizszy indeks) wsrod scalonych regul."""
+    sub_rules = rule.split(" + ")
+    ranks = [RULE_SORT_ORDER.index(r) for r in sub_rules if r in RULE_SORT_ORDER]
+    return min(ranks) if ranks else len(RULE_SORT_ORDER)
+
+
+def _candidate_sort_key(c: dict) -> tuple:
+    return (c["Source_URL"], rule_sort_key(c["Rule"]), c["Target_URL"])
+
+
 # Reguly, do ktorych stosuje sie limit `max_level_diff` (patrz run_all_rules) -
 # obie licza sie "w dol" po dowolnej liczbie poziomow drzewa kategorii, wiec
 # obie moga eksplodowac do setek propozycji pod szerokim dzialem L1/L2.
@@ -403,8 +434,11 @@ def run_all_rules(pages: list[PageRow], max_level_diff: int = 1) -> dict:
     filter_within, filter_cut = _split_by_depth_limit(filter_candidates, max_level_diff)
 
     raw = hierarchy_within + brand_candidates + filter_within
-    all_candidates = merge_candidates(raw)
-    cut_by_depth_candidates = merge_candidates(hierarchy_cut + filter_cut)
+    all_candidates = sorted(merge_candidates(raw), key=_candidate_sort_key)
+    cut_by_depth_candidates = sorted(
+        merge_candidates(hierarchy_cut + filter_cut),
+        key=_candidate_sort_key,
+    )
 
     return {
         "all_candidates": all_candidates,
