@@ -1,6 +1,10 @@
 """
 Budowanie plikow wyjsciowych (xlsx) z gotowych kandydatow do linkowania:
-  1. Plik "do oceny" - kandydaci + arkusze pomocnicze do recznej weryfikacji.
+  1. Plik "do oceny" - kandydaci + arkusze pomocnicze do recznej weryfikacji:
+     Kandydaci_linkowania, L1_do_uzupelnienia, L2_pod_L1_bez_siostr,
+     Pominiete_zbyt_glebokie (kandydaci odcieci limitem max_level_diff),
+     Marka_wykluczona_generyczna (kategorie z generycznym leafem, np.
+     "Akcesoria", pominiete przy dopasowaniu marka 1-segmentowe), Diagnostyka.
   2. Macierz "do Contentful" - jeden wiersz na zrodlowy URL, w kolejnych
      kolumnach URL-e, do ktorych ten URL ma linkowac.
 """
@@ -39,7 +43,13 @@ def build_review_workbook(
     no_base_found: list,
     pages: list,
     distinct_filtry_main_categories: int | None = None,
+    cut_by_depth_candidates: list[dict] | None = None,
+    max_level_diff: int | None = None,
+    brand_generic_excluded: list | None = None,
 ) -> bytes:
+    cut_by_depth_candidates = cut_by_depth_candidates or []
+    brand_generic_excluded = brand_generic_excluded or []
+
     type_counts = Counter(p.url_type for p in pages)
     rule_counts = Counter()
     for c in all_candidates:
@@ -51,9 +61,9 @@ def build_review_workbook(
     ws1 = wb.active
     ws1.title = "Kandydaci_linkowania"
     headers = [
-        "Source_URL", "Source_Type", "Source_Level",
-        "Target_URL", "Target_Type", "Target_Level",
-        "Poziom_roznica", "Anchor", "Rule",
+        "Source_URL", "Target_URL", "Source_Level", "Rule",
+        "Source_Type", "Target_Type", "Target_Level",
+        "Poziom_roznica", "Anchor",
     ]
     _write_table(ws1, headers, all_candidates)
 
@@ -95,6 +105,36 @@ def build_review_workbook(
     ]
     _write_table(ws2b, l2_headers, l2_rows)
 
+    ws2c = wb.create_sheet("Pominiete_zbyt_glebokie")
+    depth_headers = [
+        "Source_URL", "Target_URL", "Source_Level", "Rule",
+        "Source_Type", "Target_Type", "Target_Level",
+        "Poziom_roznica", "Anchor",
+    ]
+    _write_table(ws2c, depth_headers, cut_by_depth_candidates)
+    if ws2c.max_row == 1:
+        ws2c.append(["(brak - wszyscy kandydaci miesca sie w limicie glebokosci)"])
+
+    ws2d = wb.create_sheet("Marka_wykluczona_generyczna")
+    generic_headers = ["Source_URL", "Source_Type", "Source_Level", "Anchor", "Uwaga"]
+    generic_rows = [
+        {
+            "Source_URL": p.url,
+            "Source_Type": "category",
+            "Source_Level": p.level_label,
+            "Anchor": p.h1,
+            "Uwaga": "BRAK AUTOMATYCZNEJ PROPOZYCJI MARKA (1-segmentowe) - ostatni segment "
+                     "breadcrumba jest slowem w pelni generycznym (np. \"Akcesoria\"), samo w "
+                     "sobie nie niesie informacji o produkcie. Kategoria dalej dostaje normalnie "
+                     "linki z regul kategoria_podrzedna / kategoria_tego_samego_poziomu / filtr_* "
+                     "oraz z precyzyjnego dopasowania marka 2-segmentowego, jesli pasuje - traci "
+                     "TYLKO orientacyjne dopasowanie marki po samej nazwie. Do recznej oceny, "
+                     "jesli warto tu dodac link do marki.",
+        }
+        for p in sorted(brand_generic_excluded, key=lambda x: x.url)
+    ]
+    _write_table(ws2d, generic_headers, generic_rows)
+
     ws3 = wb.create_sheet("Diagnostyka")
     ws3.append(["Metryka", "Wartosc"])
     for c in ws3[1]:
@@ -112,6 +152,11 @@ def build_review_workbook(
         ("Kategorie L1 (brak automatycznych sasiadow tego samego poziomu)", len(l1_categories)),
         ("Kategorie L2 pod L1 (brak automatycznych 'siostr' - szeroki dzial)", len(l2_under_l1_no_siblings)),
         ("Strony filtrowane bez dopasowanej kategorii bazowej po breadcrumbie", len(no_base_found)),
+        ("", ""),
+        ("Limit roznicy poziomow dla kategoria_podrzedna / filtr_podrzedny (Poziom_roznica)", max_level_diff),
+        ("Kandydaci odcieci limitem glebokosci (patrz arkusz Pominiete_zbyt_glebokie)", len(cut_by_depth_candidates)),
+        ("Kategorie wykluczone z dopasowania marka 1-segmentowe - nazwa generyczna "
+         "(patrz arkusz Marka_wykluczona_generyczna)", len(brand_generic_excluded)),
         ("", ""),
         ("Strony wziete pod uwage razem (po filtrach 3xx/4xx/noindex)", len(pages)),
         ("  - typu category", type_counts.get("category", 0)),

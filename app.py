@@ -20,6 +20,45 @@ from export import build_review_workbook, build_contentful_matrix
 
 st.set_page_config(page_title="Chmura linkow - linkowanie wewnetrzne", page_icon="🔗", layout="wide")
 
+
+def _configured_password() -> str | None:
+    """st.secrets rzuca wyjatek (nie zwraca None), jesli w ogole nie ma pliku
+    secrets.toml - trzeba to zlapac, zeby pokazac czytelny blad zamiast stack trace."""
+    try:
+        return st.secrets.get("password")
+    except Exception:
+        return None
+
+
+def _password_entered() -> None:
+    if st.session_state.get("password_input") == _configured_password():
+        st.session_state["password_correct"] = True
+        del st.session_state["password_input"]  # nie trzymaj hasla w pamieci sesji
+    else:
+        st.session_state["password_correct"] = False
+
+
+def check_password() -> bool:
+    """Bramka dostepu - haslo ustawiane w Secrets (klucz `password`), patrz README."""
+    if st.session_state.get("password_correct"):
+        return True
+
+    if not _configured_password():
+        st.error(
+            "Brak skonfigurowanego hasla dostepu. W Streamlit Community Cloud: "
+            "**Settings -> Secrets** i dodaj:\n\n```\npassword = \"twoje-haslo\"\n```"
+        )
+        st.stop()
+
+    st.text_input("🔒 Haslo dostepu", type="password", key="password_input", on_change=_password_entered)
+    if st.session_state.get("password_correct") is False:
+        st.error("Nieprawidlowe haslo.")
+    return False
+
+
+if not check_password():
+    st.stop()
+
 st.title("🔗 Chmura linkow - generator linkowania wewnetrznego")
 st.caption(
     "Kategoria → kategoria + marka + filtr, na podstawie breadcrumba z crawla. "
@@ -38,9 +77,19 @@ with st.expander("Jak to dziala? (kliknij, zeby rozwinac)", expanded=False):
 3. Zaznaczasz wykluczenia (3xx / 4xx / noindex) i klikasz **Uruchom analize**.
 4. Dostajesz dwa pliki: pelna liste kandydatow do oceny oraz gotowa macierz do wgrania w Contentful.
 
-**Reguly:** kategoria → kategoria (ten sam poziom + wszystko ponizej w drzewie), kategoria → filtr
-(dopasowanie po identycznym breadcrumbie strony z parametrem), kategoria → marka (dopasowanie po
-1 lub 2 ostatnich segmentach nazwy w breadcrumbie).
+**Reguly:** kategoria → kategoria (ten sam poziom + wszystko ponizej w drzewie, ale tylko do
+limitu "Maksymalna roznica poziomow" ponizej - patrz suwak w sekcji 2), kategoria → filtr
+(dopasowanie po identycznym breadcrumbie strony z parametrem, ten sam limit glebokosci dla
+filtr_podrzedny), kategoria → marka (dopasowanie po 1 lub 2 ostatnich segmentach nazwy w
+breadcrumbie; kategorie/marki z w pelni generycznym ostatnim segmentem, np. "Akcesoria", sa
+calkowicie wykluczone z dopasowania 1-segmentowego - trafiaja do arkusza
+Marka_wykluczona_generyczna zamiast do kandydatow).
+
+**Co trafia do osobnych arkuszy zamiast do glownej listy kandydatow:**
+- `Pominiete_zbyt_glebokie` - kandydaci kategoria_podrzedna/filtr_podrzedny odcieci limitem
+  roznicy poziomow (nic nie ginie, tylko wymaga recznej decyzji, jesli chcesz je jednak dodac).
+- `Marka_wykluczona_generyczna` - kategorie z generycznym ostatnim segmentem breadcrumba (np.
+  "Akcesoria"), ktore nie dostaly automatycznej propozycji marki 1-segmentowej.
         """
     )
 
@@ -64,6 +113,19 @@ with c2:
 with c3:
     exclude_noindex = st.checkbox("Nie uwzgledniaj noindex (Non-Indexable)", value=True)
 st.caption("Strony z kodem 5xx sa wykluczane zawsze - to nigdy nie jest dobry kandydat na link.")
+
+max_level_diff = st.slider(
+    "Maksymalna roznica poziomow dla kategoria_podrzedna / filtr_podrzedny",
+    min_value=1,
+    max_value=5,
+    value=1,
+    help=(
+        "Ogranicza, jak daleko 'w dol' drzewa kategorii moze isc automatyczny link "
+        "z szerokiego dzialu (np. 'AGD male' -> kategoria 3 poziomy nizej). Domyslnie 1 "
+        "= tylko bezposrednie dzieci. Kandydaci ponizej tego limitu nie znikaja - trafiaja "
+        "do arkusza 'Pominiete_zbyt_glebokie' w pliku do oceny, do recznej decyzji."
+    ),
+)
 
 st.header("3. Analiza")
 run_clicked = st.button("▶️ Uruchom analize", type="primary")
@@ -115,7 +177,7 @@ if run_clicked:
                 )
                 st.stop()
 
-            result = run_all_rules(pages)
+            result = run_all_rules(pages, max_level_diff=max_level_diff)
             all_candidates = result["all_candidates"]
 
         st.subheader("Podsumowanie")
@@ -124,6 +186,16 @@ if run_clicked:
         m2.metric("Strony wziete pod uwage", len(pages))
         m3.metric("Kategorie L1 (do recznego uzup.)", len(result["l1_categories"]))
         m4.metric("Kategorie L2 pod L1 (bez siostr)", len(result["l2_under_l1_no_siblings"]))
+
+        m5, m6 = st.columns(2)
+        m5.metric(
+            "Odcieci limitem glebokosci (arkusz Pominiete_zbyt_glebokie)",
+            len(result["cut_by_depth_candidates"]),
+        )
+        m6.metric(
+            "Kategorie wykluczone z marki (nazwa generyczna)",
+            len(result["brand_generic_excluded"]),
+        )
 
         rule_counts = pd.Series(
             [r for c in all_candidates for r in c["Rule"].split(" + ")]
@@ -139,6 +211,9 @@ if run_clicked:
             result["l2_under_l1_no_siblings"],
             result["no_base_found"],
             pages,
+            cut_by_depth_candidates=result["cut_by_depth_candidates"],
+            max_level_diff=result["max_level_diff"],
+            brand_generic_excluded=result["brand_generic_excluded"],
         )
         contentful_bytes = build_contentful_matrix(all_candidates)
 

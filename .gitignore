@@ -5,3 +5,4 @@ venv/
 .DS_Store
 *.xlsx
 !sample_data/*.xlsx
+.streamlit/secrets.toml

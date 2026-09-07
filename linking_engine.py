@@ -20,14 +20,28 @@ realnych danych sklepu e-commerce:
       ktorego dzieci nie sa tematycznie spokrewnione, tylko formalnie na tym
       samym poziomie)
     - kategoria_podrzedna: kazdy przodek z breadcrumba -> ta kategoria, na
-      kazdym poziomie ponizej (nie tylko bezposrednie dzieci)
+      kazdym poziomie ponizej (nie tylko bezposrednie dzieci), ale TYLKO do
+      glebokosci `max_level_diff` (patrz run_all_rules) - liczonej jako
+      Poziom_roznica = Target_Level - Source_Level. Kandydaci ponizej tego
+      limitu (np. link z szerokiego dzialu 3-4 poziomy w dol) nie trafiaja
+      do glownej listy, tylko do osobnego arkusza pomocniczego (nic nie
+      ginie bez sladu, tylko wymaga recznej decyzji)
     - filtr_wlasny / filtr_tego_samego_poziomu / filtr_podrzedny: jak wyzej,
       ale dla stron z filtrem, dopasowanych do kategorii bazowej po IDENTYCZNEJ
-      krotce Breadcrumb_Name (bo parametr URL nie zmienia breadcrumba w DOM)
+      krotce Breadcrumb_Name (bo parametr URL nie zmienia breadcrumba w DOM).
+      filtr_podrzedny podlega temu samemu limitowi `max_level_diff` co
+      kategoria_podrzedna (ten sam mechanizm, ten sam problem "eksplozji"
+      linkow pod szerokimi dzialami)
     - marka_precyzyjna_2seg / marka_orientacyjna_1seg(_UWAGA_KOLIZJA):
       dopasowanie kategorii do marki po 2 (precyzyjne) lub 1 (orientacyjne,
       wiecej propozycji, ryzyko falszywych trafien dla nazw powtarzajacych
-      sie w >1 dziale) ostatnich segmentach breadcrumba
+      sie w >1 dziale) ostatnich segmentach breadcrumba. Kategorie/marki,
+      ktorych OSTATNI segment breadcrumba jest slowem w pelni generycznym
+      (patrz GENERIC_LEAF_EXCLUSIONS_DEFAULT, np. "Akcesoria" - nie niesie
+      zadnej informacji o produkcie) sa CALKOWICIE wykluczone z dopasowania
+      1-segmentowego (nie tylko oznaczone jako kolizja) - trafiaja do
+      osobnej listy `brand_generic_excluded` zamiast do kandydatow. Dopasowanie
+      2-segmentowe (precyzyjne) tych kategorii/marek nie dotyczy.
 """
 
 from __future__ import annotations
@@ -83,14 +97,14 @@ class PageRow:
 def _candidate(source: PageRow, target: PageRow, rule: str) -> dict:
     return {
         "Source_URL": source.url,
-        "Source_Type": source.url_type,
-        "Source_Level": source.level_label,
         "Target_URL": target.url,
+        "Source_Level": source.level_label,
+        "Rule": rule,
+        "Source_Type": source.url_type,
         "Target_Type": target.url_type,
         "Target_Level": target.level_label,
         "Poziom_roznica": target.level - source.level,
         "Anchor": target.h1,
-        "Rule": rule,
     }
 
 
@@ -209,6 +223,16 @@ KNOWN_COLLISION_LEAVES_DEFAULT = {
     "Zabawki",
 }
 
+# Ostatnie segmenty breadcrumba, ktore same w sobie nie niosa zadnej informacji
+# o produkcie/dziale (np. "Akcesoria" pasuje jednoczesnie do "Akcesoria AGD" i
+# do "DJI Akcesoria" - dopasowanie po samej nazwie jest bez sensu niezaleznie
+# od tego, czy technicznie "koliduje" miedzy dzialami). Kategorie/marki z takim
+# leafem sa CALKOWICIE wykluczone z dopasowania 1-segmentowego (nie tylko
+# oznaczone jak w KNOWN_COLLISION_LEAVES_DEFAULT).
+GENERIC_LEAF_EXCLUSIONS_DEFAULT = {
+    "Akcesoria",
+}
+
 
 def find_collision_leaves(pages: list[PageRow]) -> set:
     """
@@ -223,14 +247,33 @@ def find_collision_leaves(pages: list[PageRow]) -> set:
     return {leaf for leaf, l1s in leaf_to_l1.items() if len(l1s) > 1}
 
 
-def build_category_brand_candidates(pages: list[PageRow], collision_leaves: set = None) -> list[dict]:
+def build_category_brand_candidates(
+    pages: list[PageRow],
+    collision_leaves: set = None,
+    generic_leaf_exclusions: set = None,
+) -> tuple[list[dict], list[PageRow]]:
+    """
+    Zwraca (kandydaci, kategorie_wykluczone_generyczny_leaf).
+    `generic_leaf_exclusions` - patrz GENERIC_LEAF_EXCLUSIONS_DEFAULT: kategorie
+    i marki, ktorych ostatni segment breadcrumba jest na tej liscie, sa
+    calkowicie pomijane przy dopasowaniu 1-segmentowym (nie trafiaja nawet do
+    indeksu po stronie marki, ani nie sa sprawdzane po stronie kategorii).
+    """
     if collision_leaves is None:
         collision_leaves = find_collision_leaves(pages) or KNOWN_COLLISION_LEAVES_DEFAULT
+    if generic_leaf_exclusions is None:
+        generic_leaf_exclusions = GENERIC_LEAF_EXCLUSIONS_DEFAULT
 
     categories_2 = [p for p in pages if p.url_type == "category" and p.level >= 2]
-    categories_1 = [p for p in pages if p.url_type == "category" and p.level >= 1]
+    categories_1_all = [p for p in pages if p.url_type == "category" and p.level >= 1]
     brands_2 = [p for p in pages if p.url_type == "brand" and p.level >= 2]
-    brands_1 = [p for p in pages if p.url_type == "brand" and p.level >= 1]
+    brands_1_all = [p for p in pages if p.url_type == "brand" and p.level >= 1]
+
+    categories_1 = [c for c in categories_1_all if c.breadcrumb_names[-1] not in generic_leaf_exclusions]
+    brands_1 = [b for b in brands_1_all if b.breadcrumb_names[-1] not in generic_leaf_exclusions]
+    generic_excluded_categories = [
+        c for c in categories_1_all if c.breadcrumb_names[-1] in generic_leaf_exclusions
+    ]
 
     candidates = []
 
@@ -254,7 +297,7 @@ def build_category_brand_candidates(pages: list[PageRow], collision_leaves: set 
         for b in idx1.get(leaf, []):
             candidates.append(_candidate(c, b, rule))
 
-    return candidates
+    return candidates, generic_excluded_categories
 
 
 # --------------------------------------------------------------------------
@@ -326,20 +369,50 @@ def merge_candidates(raw_candidates: list[dict]) -> list[dict]:
     return list(merged.values())
 
 
-def run_all_rules(pages: list[PageRow]) -> dict:
-    """Uruchamia wszystkie reguly i zwraca slownik z surowymi/pomocniczymi wynikami."""
+# Reguly, do ktorych stosuje sie limit `max_level_diff` (patrz run_all_rules) -
+# obie licza sie "w dol" po dowolnej liczbie poziomow drzewa kategorii, wiec
+# obie moga eksplodowac do setek propozycji pod szerokim dzialem L1/L2.
+DEPTH_LIMITED_RULES = {"kategoria_podrzedna", "filtr_podrzedny"}
+
+
+def _split_by_depth_limit(candidates: list[dict], max_level_diff: int) -> tuple[list[dict], list[dict]]:
+    within, cut = [], []
+    for c in candidates:
+        if c["Rule"] in DEPTH_LIMITED_RULES and c["Poziom_roznica"] > max_level_diff:
+            cut.append(c)
+        else:
+            within.append(c)
+    return within, cut
+
+
+def run_all_rules(pages: list[PageRow], max_level_diff: int = 1) -> dict:
+    """
+    Uruchamia wszystkie reguly i zwraca slownik z surowymi/pomocniczymi wynikami.
+    `max_level_diff`: maksymalna Poziom_roznica (Target_Level - Source_Level)
+    dopuszczalna dla regul kategoria_podrzedna / filtr_podrzedny - patrz
+    DEPTH_LIMITED_RULES. Kandydaci ponizej limitu nie trafiaja do
+    `all_candidates`, tylko do `cut_by_depth_candidates` (osobny arkusz do
+    recznej oceny, nic nie ginie bez sladu).
+    """
     hierarchy_candidates, l1_categories, l2_under_l1_no_siblings = build_category_hierarchy_candidates(pages)
     collision_leaves = find_collision_leaves(pages)
-    brand_candidates = build_category_brand_candidates(pages, collision_leaves)
+    brand_candidates, brand_generic_excluded = build_category_brand_candidates(pages, collision_leaves)
     filter_candidates, no_base_found = build_category_filter_candidates(pages)
 
-    raw = hierarchy_candidates + brand_candidates + filter_candidates
+    hierarchy_within, hierarchy_cut = _split_by_depth_limit(hierarchy_candidates, max_level_diff)
+    filter_within, filter_cut = _split_by_depth_limit(filter_candidates, max_level_diff)
+
+    raw = hierarchy_within + brand_candidates + filter_within
     all_candidates = merge_candidates(raw)
+    cut_by_depth_candidates = merge_candidates(hierarchy_cut + filter_cut)
 
     return {
         "all_candidates": all_candidates,
+        "cut_by_depth_candidates": cut_by_depth_candidates,
+        "max_level_diff": max_level_diff,
         "hierarchy_candidates": hierarchy_candidates,
         "brand_candidates": brand_candidates,
+        "brand_generic_excluded": brand_generic_excluded,
         "filter_candidates": filter_candidates,
         "l1_categories": l1_categories,
         "l2_under_l1_no_siblings": l2_under_l1_no_siblings,

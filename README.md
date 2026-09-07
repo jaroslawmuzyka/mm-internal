@@ -20,10 +20,13 @@ struktura (kategorie / filtry-fasety / strony marek + breadcrumb).
 2. **Typ kazdej strony** jest ustalany po przynaleznosci do listy
    Kategorie/Filtry/Marki - NIE po wzorcu URL-a. Dzieki temu narzedzie nie
    jest zaszyte pod jedna platforme e-commerce.
-3. **Zaznaczasz wykluczenia** (3xx, 4xx, noindex) i klikasz "Uruchom analize".
+3. **Zaznaczasz wykluczenia** (3xx, 4xx, noindex), ustawiasz suwak **"Maksymalna
+   roznica poziomow"** (domyslnie 1 - patrz sekcja Reguly ponizej) i klikasz
+   "Uruchom analize".
 4. **Dostajesz dwa pliki:**
    - `chmura_linkow_do_oceny.xlsx` - pelna lista kandydatow + arkusze
-     pomocnicze (`L1_do_uzupelnienia`, `L2_pod_L1_bez_siostr`, `Diagnostyka`)
+     pomocnicze (`L1_do_uzupelnienia`, `L2_pod_L1_bez_siostr`,
+     `Pominiete_zbyt_glebokie`, `Marka_wykluczona_generyczna`, `Diagnostyka`)
      do recznej weryfikacji
    - `chmura_linkow_matryca_contentful.xlsx` - gotowa macierz: pierwsza
      kolumna `Source_URL`, kolejne `Link_1, Link_2, ...` z URL-ami do
@@ -66,16 +69,35 @@ mapowania przez osobny arkusz Main Category → Final URL).
   spokrewnione mimo wspolnego rodzica. Takie kategorie trafiaja do
   `L2_pod_L1_bez_siostr` do recznej selekcji.
 - **kategoria_podrzedna** - kazdy przodek z breadcrumba -> ta kategoria, na
-  kazdym poziomie ponizej (nie tylko bezposrednie dzieci).
+  kazdym poziomie ponizej (nie tylko bezposrednie dzieci) - **ale tylko do
+  limitu "Maksymalna roznica poziomow"** ustawionego suwakiem w UI (domyslnie
+  `1` = tylko bezposrednie dzieci). Bez tego limitu szeroki dzial typu "AGD
+  male" potrafil dostac 260 propozycji linkow naraz (2-4 poziomy w dol drzewa),
+  co jest nie do wdrozenia bez recznego przycinania. Kandydaci odcieci limitem
+  NIE znikaja - trafiaja do arkusza `Pominiete_zbyt_glebokie` do recznej
+  decyzji, czy warto je jednak dodac.
 - **filtr_wlasny / filtr_tego_samego_poziomu / filtr_podrzedny** - jak wyzej,
   ale dla stron z filtrem (dopasowanych do kategorii bazowej po identycznej
-  krotce breadcrumba).
+  krotce breadcrumba). `filtr_podrzedny` podlega temu samemu limitowi
+  "Maksymalna roznica poziomow" co `kategoria_podrzedna` (ten sam mechanizm,
+  ten sam problem "eksplozji" linkow pod szerokimi dzialami) - odcieci
+  kandydaci tez trafiaja do `Pominiete_zbyt_glebokie`.
 - **marka_precyzyjna_2seg** - dopasowanie kategorii do marki po 2 ostatnich
   segmentach nazwy w breadcrumbie (male ryzyko falszywych trafien).
 - **marka_orientacyjna_1seg(_UWAGA_KOLIZJA)** - jak wyzej, po 1 segmencie
   (wiecej propozycji, ale nazwy powtarzajace sie w >1 dziale sa oznaczone
   `_UWAGA_KOLIZJA` do recznej weryfikacji - wykrywane automatycznie z danych,
-  nie na sztywno).
+  nie na sztywno). Kategorie/marki, ktorych **ostatni segment breadcrumba jest
+  slowem w pelni generycznym** (np. "Akcesoria" - samo w sobie nie niesie
+  zadnej informacji o produkcie, wiec np. kategoria "Akcesoria" w dziale AGD
+  bledasnie parowala z marka "DJI Akcesoria") sa **calkowicie wykluczone** z
+  dopasowania 1-segmentowego - nie tylko oznaczone jako kolizja, tylko w ogole
+  nie generuja tej propozycji. Lista takich slow: `GENERIC_LEAF_EXCLUSIONS_DEFAULT`
+  w `linking_engine.py` (na start: `"Akcesoria"`). Takie kategorie trafiaja do
+  arkusza `Marka_wykluczona_generyczna` - dalej dostaja normalnie linki ze
+  wszystkich pozostalych regul (kategoria_podrzedna, kategoria_tego_samego_poziomu,
+  filtr_*, marka_precyzyjna_2seg), traca TYLKO orientacyjne dopasowanie marki
+  po samej nazwie.
 
 Kazdy wiersz w wyniku ma kolumne `Poziom_roznica` (Target level − Source
 level: 0 = ten sam poziom, dodatnia = ile poziomow nizej jest target) - w
@@ -92,6 +114,24 @@ kierunki tym samym schematem:
 Najprosciej: skopiuj `build_category_hierarchy_candidates` /
 `build_category_brand_candidates` / `build_category_filter_candidates` i
 zamien, ktory typ jest `Source`, a ktory `Target`.
+
+## Haslo dostepu
+
+Aplikacja jest zabezpieczona hasłem (ekran logowania przed wgraniem plikow).
+Haslo ustawia sie przez **Secrets**, nie w kodzie:
+
+- **Streamlit Community Cloud**: wejdz w aplikacje -> **Settings -> Secrets** i
+  wklej:
+  ```
+  password = "twoje-haslo"
+  ```
+  Zapisz - aplikacja sama sie zrestartuje z nowym haslem. Zmiana hasla pozniej
+  = ta sama sciezka, bez zadnego deployu.
+- **Lokalnie**: stworz plik `.streamlit/secrets.toml` (w `.gitignore`, nigdy
+  nie trafia do repo) z ta sama zawartoscia.
+
+Jesli haslo nie jest ustawione w Secrets, aplikacja pokazuje blad zamiast
+ekranu logowania (nie da sie jej przypadkiem zostawic bez zabezpieczenia).
 
 ## Uruchomienie lokalne
 
