@@ -12,12 +12,16 @@ wykluczenia, klikasz "Uruchom analize" i dostajesz dwa pliki xlsx:
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pandas as pd
 import streamlit as st
 
 from linking_engine import build_pages, run_all_rules
 from io_utils import read_url_list_file, read_internal_html_file
 from export import build_review_workbook, build_contentful_matrix, SOURCE_TYPE_SHEET_NAMES
+import ai_eval
 
 
 st.set_page_config(page_title="Chmura linkow - linkowanie wewnetrzne", page_icon="🔗", layout="wide")
@@ -44,6 +48,34 @@ def _configured_anchor_suffix() -> str:
         return st.secrets.get("anchor_suffix_to_strip") or ""
     except Exception:
         return ""
+
+
+def _configured_openai_key() -> str:
+    """Domyslna wartosc pola z kluczem OpenAI - z Secrets (klucz `openai_api_key`),
+    zeby klucz nie musial byc wpisywany recznie za kazdym razem ani zaszyty w kodzie."""
+    try:
+        return st.secrets.get("openai_api_key") or ""
+    except Exception:
+        return ""
+
+
+def _configured_openai_model() -> str:
+    """Domyslny model OpenAI - z Secrets (klucz `openai_model`), albo
+    ai_eval.DEFAULT_MODEL jesli nie ustawiono (latwo podmienic bez zmiany kodu,
+    gdyby model zostal wycofany/zmieniony)."""
+    try:
+        return st.secrets.get("openai_model") or ai_eval.DEFAULT_MODEL
+    except Exception:
+        return ai_eval.DEFAULT_MODEL
+
+
+def _ai_thread_running() -> bool:
+    """Czy w tle dziala watek oceny AI (patrz sekcja 3. Analiza nizej) - Streamlit
+    nie przetwarza klikniec w trakcie jednego dlugiego, synchronicznego przebiegu
+    skryptu, wiec ocena AI idzie w osobnym watku, a glowny skrypt co chwile sam
+    sie odswieza (st.rerun) i przy okazji sprawdza stan tego watku / przycisk Przerwij."""
+    t = st.session_state.get("ai_thread")
+    return t is not None and t.is_alive()
 
 
 def _password_entered() -> None:
@@ -141,7 +173,26 @@ with st.expander("Jak to dziala? (kliknij, zeby rozwinac)", expanded=False):
    breadcrumba: cosine similarity miedzy embeddingami tresci stron (jesli kolumna jest
    dostepna w Internal HTML), max **10** najbardziej podobnych stron per strona (suwak nizej),
    ale TYLKO pary, ktorych ZADNA z powyzszych regul jeszcze nie zaproponowala - nie duplikuje,
-   tylko dokdada. Kolumna `Podobienstwo` (0-1) jest wypelniona tylko dla tych wierszy.
+   tylko dokdada. Kolumna `Podobienstwo` (0-1) jest wypelniona tylko dla tych wierszy. To
+   JEDYNA warstwa bez potwierdzenia strukturalnego (breadcrumb) - stad opcjonalna ocena AI
+   ponizej, TYLKO dla niej.
+
+### Ocena AI trafnosci warstwy embedding_podobienstwo (opcjonalnie)
+
+Poniewaz embedding_podobienstwo nie ma zadnego potwierdzenia strukturalnego (moze polaczyc
+tematycznie odlegle strony, ktore sa embeddingowo podobne z przypadku, np. "Multicookery" z
+"Zamrazarkami"), mozesz wlaczyc dodatkowa ocene modelu OpenAI: dla kazdej takiej pary model
+dostaje Title + H1 obu stron i odpowiada **TAK** (dobrze pasuja) / **NIE** (nie pasuja, link
+bylby mylacy) / **MOŻE** (niejednoznaczne, do recznej weryfikacji). Wynik trafia do kolumny
+`Ocena_AI` zaraz obok `Rule`. Pozostale reguly NIE sa oceniane przez AI - maja juz potwierdzenie
+po breadcrumbie, nie ma takiej potrzeby. Wymaga klucza API OpenAI (pole w sekcji 2 ponizej;
+domyslna wartosc mozna ustawic w Secrets - klucz `openai_api_key`, model `openai_model`).
+
+Ocena idzie paczkami (po 30 par) i pokazuje wlasny pasek postepu w sekcji 3 ponizej. W trakcie
+mozna kliknac **⏹ Przerwij ocene AI** - przerwanie konczy biezaca paczke i od razu buduje pliki
+wynikowe z tym, co juz zdazylo zostac ocenione (reszta wierszy zostaje po prostu bez `Ocena_AI`,
+tak jak przy bledzie zapytania). Reszta analizy (wszystkie pozostale reguly) nie jest tym w ogole
+dotknieta - to przerywa wylacznie ocene AI.
 
 ### Linkowanie odwrocone - marka i filtr tez SA zrodlem, nie tylko targetem
 
@@ -239,8 +290,9 @@ innej kolumny). Bez tego kroku narzedzie dziala normalnie, po prostu bez tej war
 **4. Eksport:**
 Po zakonczeniu crawla: zakladka **Internal** (filtr HTML) -> **Export** (albo
 `Bulk Export -> Web -> All`), format `.xlsx` lub `.csv`. Upewnij sie, ze w eksporcie sa
-kolumny: `Address`/`Original Url`, `Status Code`, `Indexability`, `H1-1`,
-`Breadcrumb_URL 1..N`, `Breadcrumb_Name 1..N` i (opcjonalnie) `Extract embeddings from page content`.
+kolumny: `Address`/`Original Url`, `Status Code`, `Indexability`, `H1-1`, `Title 1`
+(opcjonalna, ale wymagana do oceny AI - patrz nizej), `Breadcrumb_URL 1..N`,
+`Breadcrumb_Name 1..N` i (opcjonalnie) `Extract embeddings from page content`.
 
 **5. Noindex a filtry:**
 Fasety/filtry czesto maja `noindex, follow` (celowo, zeby nie rozdmuchiwac indeksu) - to NIE
@@ -308,10 +360,153 @@ anchor_suffix_to_strip = st.text_input(
     ),
 )
 
-st.header("3. Analiza")
-run_clicked = st.button("▶️ Uruchom analize", type="primary")
+st.subheader("Ocena AI trafnosci warstwy embedding_podobienstwo (opcjonalnie)")
+st.caption(
+    "Dotyczy WYLACZNIE propozycji z warstwy embedding_podobienstwo (jedynej bez potwierdzenia "
+    "strukturalnego po breadcrumbie) - reszta regul nie jest wysylana do OpenAI, bo nie ma takiej "
+    "potrzeby. Wynik (TAK / NIE / MOŻE) trafia do kolumny `Ocena_AI` zaraz obok `Rule`."
+)
+use_ai_eval = st.checkbox(
+    "Wlacz ocene AI (wymaga klucza OpenAI)",
+    value=bool(_configured_openai_key()),
+    disabled=_ai_thread_running(),
+)
+ai_col1, ai_col2 = st.columns(2)
+with ai_col1:
+    openai_api_key = st.text_input(
+        "Klucz API OpenAI",
+        value=_configured_openai_key(),
+        type="password",
+        help=(
+            "Domyslna wartosc mozna ustawic w Secrets (klucz `openai_api_key`), zeby nie wpisywac "
+            "recznie za kazdym razem - patrz README."
+        ),
+        disabled=not use_ai_eval,
+    )
+with ai_col2:
+    openai_model = st.text_input(
+        "Model OpenAI",
+        value=_configured_openai_model(),
+        help="Domyslna wartosc mozna ustawic w Secrets (klucz `openai_model`).",
+        disabled=not use_ai_eval,
+    )
+st.caption(
+    "Koszt/czas: kazde zapytanie ocenia do 30 par naraz (Title + H1 obu stron - nie cala tresc "
+    "strony), wiec liczba zapytan to z grubsza liczba propozycji embeddingowych podzielona przez 30. "
+    "Przy duzej liczbie propozycji (wysoki suwak embedding_top_n powyzej) moze to zajac dluzsza chwile."
+)
 
-if run_clicked:
+def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors):
+    """
+    Wspolny "finisz" po analizie - Podsumowanie + budowa 2 plikow xlsx +
+    zapis do session_state (skad je pobiera sekcja '4. Pobierz pliki').
+    Wywolywane w dwoch miejscach: od razu po run_all_rules (gdy ocena AI jest
+    wylaczona/pominieta) albo dopiero po zakonczeniu watku oceny AI w tle
+    (patrz sekcja 3. Analiza nizej).
+    """
+    if ai_errors:
+        st.warning(
+            "Niektore zapytania do OpenAI nie powiodly sie - dotkniete wiersze zostaly "
+            "bez oceny (Ocena_AI puste), reszta analizy dziala normalnie:\n\n"
+            + "\n".join(f"- {e}" for e in ai_errors[:10])
+        )
+
+    st.subheader("Podsumowanie")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Kandydaci (unikalne pary)", len(all_candidates))
+    m2.metric("Strony wziete pod uwage", len(pages))
+    m3.metric("Kategorie L1 (do recznego uzup.)", len(result["l1_categories"]))
+    m4.metric("Kategorie L2 pod L1 (bez siostr)", len(result["l2_under_l1_no_siblings"]))
+
+    m5, m6 = st.columns(2)
+    m5.metric(
+        "Odcieci limitem glebokosci (arkusz Pominiete_zbyt_glebokie)",
+        len(result["cut_by_depth_candidates"]),
+    )
+    m6.metric(
+        "Kategorie wykluczone z marki (nazwa generyczna)",
+        len(result["brand_generic_excluded"]),
+    )
+    m7, m8 = st.columns(2)
+    m7.metric(
+        "Propozycje z L1 (przeniesione do arkusza L1_do_uzupelnienia)",
+        len(result["l1_outbound_candidates"]),
+    )
+    m8.metric(
+        "Nowe propozycje z warstwy embedding_podobienstwo",
+        len(result["embedding_candidates"]),
+    )
+
+    embedding_rows_all = [
+        c for c in all_candidates + result["l1_outbound_candidates"]
+        if c.get("Rule") == "embedding_podobienstwo"
+    ]
+    if any(c.get("Ocena_AI") for c in embedding_rows_all):
+        ai_verdicts = pd.Series([c.get("Ocena_AI") for c in embedding_rows_all])
+        ai_col_a, ai_col_b, ai_col_c = st.columns(3)
+        ai_col_a.metric("Ocena AI: TAK", int((ai_verdicts == "TAK").sum()))
+        ai_col_b.metric("Ocena AI: MOŻE", int((ai_verdicts == "MOŻE").sum()))
+        ai_col_c.metric("Ocena AI: NIE", int((ai_verdicts == "NIE").sum()))
+
+    st.caption("Kandydaci do linkowania - rozbicie na 3 zeszyty wg Source_Type:")
+    mk1, mk2, mk3 = st.columns(3)
+    by_source_type = pd.Series([c["Source_Type"] for c in all_candidates]).value_counts()
+    mk1.metric("Kandydaci do link. (kategorie)", int(by_source_type.get("category", 0)))
+    mk2.metric("Kandydaci do link. (marki)", int(by_source_type.get("brand", 0)))
+    mk3.metric("Kandydaci do link. (filtry)", int(by_source_type.get("filtered_category", 0)))
+
+    rule_counts = pd.Series(
+        [r for c in all_candidates for r in c["Rule"].split(" + ")]
+    ).value_counts()
+    st.bar_chart(rule_counts)
+
+    st.subheader("Podglad kandydatow (pierwsze 200 wierszy)")
+    st.dataframe(pd.DataFrame(all_candidates).head(200), width="stretch")
+
+    # Liczenie regul (i warstwy embedding_podobienstwo) trwa milisekundy nawet
+    # dla tysiecy stron - realny czas czekania to zapis xlsx: stylowanie
+    # komorka-po-komorce w openpyxl dla kilkunastu tysiecy wierszy potrafi
+    # zajac dziesiatki sekund, stad pasek postepu wlasnie tutaj.
+    progress_bar = st.progress(0, text="Zapisywanie pliku 'do oceny'...")
+
+    def _make_progress_cb(prefix):
+        def _cb(stage, done, total):
+            frac = min(max(done / total, 0.0), 1.0) if total else 1.0
+            progress_bar.progress(frac, text=f"{prefix}: {stage} - {done}/{total} wierszy ({frac * 100:.0f}%)")
+        return _cb
+
+    review_bytes = build_review_workbook(
+        all_candidates,
+        result["l1_categories"],
+        result["l2_under_l1_no_siblings"],
+        result["no_base_found"],
+        pages,
+        cut_by_depth_candidates=result["cut_by_depth_candidates"],
+        max_level_diff=result["max_level_diff"],
+        brand_generic_excluded=result["brand_generic_excluded"],
+        l1_outbound_candidates=result["l1_outbound_candidates"],
+        embedding_top_n=result["embedding_top_n"],
+        embedding_skipped=result["embedding_skipped"],
+        all_input_urls=all_input_urls,
+        progress=_make_progress_cb("Plik 'do oceny'"),
+    )
+
+    progress_bar.progress(0, text="Zapisywanie macierzy Contentful...")
+    contentful_bytes = build_contentful_matrix(
+        all_candidates,
+        progress=_make_progress_cb("Macierz Contentful"),
+    )
+    progress_bar.progress(1.0, text="Gotowe!")
+
+    st.session_state["review_bytes"] = review_bytes
+    st.session_state["contentful_bytes"] = contentful_bytes
+    st.session_state["all_candidates"] = all_candidates
+
+
+st.header("3. Analiza")
+run_clicked = st.button("▶️ Uruchom analize", type="primary", disabled=_ai_thread_running())
+
+if run_clicked and not _ai_thread_running():
     missing = [
         name
         for name, f in [
@@ -385,85 +580,100 @@ if run_clicked:
             )
             all_candidates = result["all_candidates"]
 
-        st.subheader("Podsumowanie")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Kandydaci (unikalne pary)", len(all_candidates))
-        m2.metric("Strony wziete pod uwage", len(pages))
-        m3.metric("Kategorie L1 (do recznego uzup.)", len(result["l1_categories"]))
-        m4.metric("Kategorie L2 pod L1 (bez siostr)", len(result["l2_under_l1_no_siblings"]))
+        # posprzataj ewentualne resztki po poprzednim biegu
+        st.session_state.pop("ai_thread", None)
+        st.session_state.pop("ai_stop_event", None)
+        st.session_state.pop("ai_progress_holder", None)
+        st.session_state.pop("ai_errors_holder", None)
 
-        m5, m6 = st.columns(2)
-        m5.metric(
-            "Odcieci limitem glebokosci (arkusz Pominiete_zbyt_glebokie)",
-            len(result["cut_by_depth_candidates"]),
-        )
-        m6.metric(
-            "Kategorie wykluczone z marki (nazwa generyczna)",
-            len(result["brand_generic_excluded"]),
-        )
-        m7, m8 = st.columns(2)
-        m7.metric(
-            "Propozycje z L1 (przeniesione do arkusza L1_do_uzupelnienia)",
-            len(result["l1_outbound_candidates"]),
-        )
-        m8.metric(
-            "Nowe propozycje z warstwy embedding_podobienstwo",
-            len(result["embedding_candidates"]),
-        )
+        ai_thread_started = False
+        if use_ai_eval and openai_api_key:
+            embedding_rows_to_eval = [
+                c for c in all_candidates + result["l1_outbound_candidates"]
+                if c.get("Rule") == "embedding_podobienstwo"
+            ]
+            if not embedding_rows_to_eval:
+                pass  # brak propozycji embeddingowych - nic do oceny, przechodzimy prosto do budowy plikow
+            else:
+                # Ocena AI idzie w OSOBNYM WATKU (nie synchronicznie tutaj) - to jedyny
+                # sposob, zeby przycisk "Przerwij" mial szanse zadzialac. W trakcie
+                # jednego dlugiego, blokujacego wywolania Streamlit nie przetwarza
+                # klikniec - dopiero po tym, jak skrypt sam sie odswiezy (st.rerun).
+                page_by_url = {p.url: p for p in pages}
+                stop_event = threading.Event()
+                progress_holder = {"done": 0, "total": len(embedding_rows_to_eval)}
+                errors_holder = []
+                model_to_use = openai_model.strip() or ai_eval.DEFAULT_MODEL
 
-        st.caption("Kandydaci do linkowania - rozbicie na 3 zeszyty wg Source_Type:")
-        mk1, mk2, mk3 = st.columns(3)
-        by_source_type = pd.Series([c["Source_Type"] for c in all_candidates]).value_counts()
-        mk1.metric("Kandydaci do link. (kategorie)", int(by_source_type.get("category", 0)))
-        mk2.metric("Kandydaci do link. (marki)", int(by_source_type.get("brand", 0)))
-        mk3.metric("Kandydaci do link. (filtry)", int(by_source_type.get("filtered_category", 0)))
+                def _ai_worker(
+                    rows=embedding_rows_to_eval, pbu=page_by_url, key=openai_api_key,
+                    model=model_to_use, ev=stop_event, ph=progress_holder, eh=errors_holder,
+                ):
+                    errs = ai_eval.evaluate_embedding_candidates(
+                        rows, pbu, api_key=key, model=model, stop_event=ev,
+                        progress=lambda d, t: ph.update(done=d, total=t),
+                    )
+                    eh.extend(errs)
 
-        rule_counts = pd.Series(
-            [r for c in all_candidates for r in c["Rule"].split(" + ")]
-        ).value_counts()
-        st.bar_chart(rule_counts)
+                thread = threading.Thread(target=_ai_worker, daemon=True)
+                st.session_state["ai_thread"] = thread
+                st.session_state["ai_stop_event"] = stop_event
+                st.session_state["ai_progress_holder"] = progress_holder
+                st.session_state["ai_errors_holder"] = errors_holder
+                thread.start()
+                ai_thread_started = True
 
-        st.subheader("Podglad kandydatow (pierwsze 200 wierszy)")
-        st.dataframe(pd.DataFrame(all_candidates).head(200), width="stretch")
+        if ai_thread_started:
+            # Watek juz dziala w tle - zapisz co potrzebne po odswiezeniu (kazdy
+            # rerun odtwarza caly skrypt od zera, lokalne zmienne znikaja) i
+            # odswiez sie, zeby wejsc w galaz z paskiem postepu + przyciskiem
+            # Przerwij (patrz elif _ai_thread_running() nizej).
+            st.session_state["pending_pages"] = pages
+            st.session_state["pending_result"] = result
+            st.session_state["pending_all_candidates"] = all_candidates
+            st.session_state["pending_all_input_urls"] = all_input_urls
+            st.rerun()
+        else:
+            # Ocena AI wylaczona/pominieta - buduj wyniki od razu, bez dodatkowego
+            # (niepotrzebnego w tym przypadku) przebiegu skryptu.
+            _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, [])
 
-        # Liczenie regul (i warstwy embedding_podobienstwo) trwa milisekundy nawet
-        # dla tysiecy stron - realny czas czekania to zapis xlsx: stylowanie
-        # komorka-po-komorce w openpyxl dla kilkunastu tysiecy wierszy potrafi
-        # zajac dziesiatki sekund, stad pasek postepu wlasnie tutaj.
-        progress_bar = st.progress(0, text="Zapisywanie pliku 'do oceny'...")
+elif _ai_thread_running():
+    # W trakcie oceny AI (odpalonej w gornej galezi, po czym skrypt sam sie
+    # odswiezyl) - pokaz pasek postepu + przycisk Przerwij, po czym znowu sam
+    # sie odswiez za chwile, zeby miec szanse zlapac ewentualne klikniecie.
+    stop_event = st.session_state["ai_stop_event"]
+    progress_holder = st.session_state["ai_progress_holder"]
 
-        def _make_progress_cb(prefix):
-            def _cb(stage, done, total):
-                frac = min(max(done / total, 0.0), 1.0) if total else 1.0
-                progress_bar.progress(frac, text=f"{prefix}: {stage} - {done}/{total} wierszy ({frac * 100:.0f}%)")
-            return _cb
+    done, total = progress_holder.get("done", 0), progress_holder.get("total", 0)
+    frac = min(max(done / total, 0.0), 1.0) if total else 0.0
+    st.progress(frac, text=f"Ocena AI: {done}/{total} propozycji embeddingowych ({frac * 100:.0f}%)")
 
-        review_bytes = build_review_workbook(
-            all_candidates,
-            result["l1_categories"],
-            result["l2_under_l1_no_siblings"],
-            result["no_base_found"],
-            pages,
-            cut_by_depth_candidates=result["cut_by_depth_candidates"],
-            max_level_diff=result["max_level_diff"],
-            brand_generic_excluded=result["brand_generic_excluded"],
-            l1_outbound_candidates=result["l1_outbound_candidates"],
-            embedding_top_n=result["embedding_top_n"],
-            embedding_skipped=result["embedding_skipped"],
-            all_input_urls=all_input_urls,
-            progress=_make_progress_cb("Plik 'do oceny'"),
-        )
+    if stop_event.is_set():
+        st.info("Przerywanie... (konczy sie biezaca paczka zapytan do OpenAI)")
+    elif st.button("⏹ Przerwij ocene AI", key="ai_stop_button"):
+        stop_event.set()
+        st.info("Przerywanie... (konczy sie biezaca paczka zapytan do OpenAI)")
 
-        progress_bar.progress(0, text="Zapisywanie macierzy Contentful...")
-        contentful_bytes = build_contentful_matrix(
-            all_candidates,
-            progress=_make_progress_cb("Macierz Contentful"),
-        )
-        progress_bar.progress(1.0, text="Gotowe!")
+    time.sleep(0.4)
+    st.rerun()
 
-        st.session_state["review_bytes"] = review_bytes
-        st.session_state["contentful_bytes"] = contentful_bytes
-        st.session_state["all_candidates"] = all_candidates
+elif st.session_state.get("pending_result") is not None:
+    # Watek oceny AI (jesli byl) juz sie skonczyl (albo od razu nie byl
+    # potrzebny) - budujemy pliki wynikowe. .pop() celowo - ten fragment ma
+    # sie wykonac RAZ, tak jak dawniej (przy nastepnych, niepowiazanych
+    # odswiezeniach np. po kliknieciu "Pobierz" ta sekcja ma juz nie wracac -
+    # dokladnie jak wczesniej, kiedy to wszystko bylo w jednym bloku run_clicked).
+    ai_errors = st.session_state.pop("ai_errors_holder", [])
+    st.session_state.pop("ai_thread", None)
+    st.session_state.pop("ai_stop_event", None)
+    st.session_state.pop("ai_progress_holder", None)
+    pages = st.session_state.pop("pending_pages")
+    result = st.session_state.pop("pending_result")
+    all_candidates = st.session_state.pop("pending_all_candidates")
+    all_input_urls = st.session_state.pop("pending_all_input_urls")
+
+    _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors)
 
 if "review_bytes" in st.session_state:
     st.header("4. Pobierz pliki")

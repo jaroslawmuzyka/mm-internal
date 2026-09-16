@@ -20,6 +20,11 @@ Budowanie plikow wyjsciowych (xlsx) z gotowych kandydatow do linkowania:
      / TIER_FILL_COLORS ponizej) - zielony = najpewniejsze (dokladne
      dopasowanie strukturalne), przez zolty/pomaranczowy, az po czerwony =
      embedding_podobienstwo (najmniej pewne, do recznej weryfikacji).
+     Kolumna `Ocena_AI` (zaraz obok `Rule`) - TAK/NIE/MOŻE - jest wypelniona
+     TYLKO dla wierszy embedding_podobienstwo, jesli w UI podano klucz OpenAI
+     (patrz ai_eval.py) - ocena modelu, czy Title/H1 stron Source i Target
+     tematycznie do siebie pasuja. Reszta regul ma juz potwierdzenie
+     strukturalne (breadcrumb), wiec nie jest oceniana przez AI.
   2. Macierz "do Contentful" - tak samo jak plik "do oceny", rozbita na 3
      osobne zeszyty wg Source_Type (patrz CONTENTFUL_SHEET_NAMES): `Matryca
      Contentful (kategorie)` / `(marki)` / `(filtry)`. W kazdym zeszycie
@@ -152,7 +157,7 @@ def build_review_workbook(
             rule_counts[r] += 1
 
     candidate_headers = [
-        "Source_URL", "Target_URL", "Rule", "Source_Level",
+        "Source_URL", "Target_URL", "Rule", "Ocena_AI", "Source_Level",
         "Source_Type", "Target_Type", "Target_Level",
         "Poziom_roznica", "Anchor", "Podobienstwo",
     ]
@@ -161,7 +166,7 @@ def build_review_workbook(
         candidates_by_source_type[c["Source_Type"]].append(c)
 
     l1_headers = [
-        "Source_URL", "Target_URL", "Rule", "Source_Level",
+        "Source_URL", "Target_URL", "Rule", "Ocena_AI", "Source_Level",
         "Source_Type", "Target_Type", "Target_Level",
         "Poziom_roznica", "Anchor", "Podobienstwo", "Uwaga",
     ]
@@ -213,7 +218,7 @@ def build_review_workbook(
     ]
 
     depth_headers = [
-        "Source_URL", "Target_URL", "Rule", "Source_Level",
+        "Source_URL", "Target_URL", "Rule", "Ocena_AI", "Source_Level",
         "Source_Type", "Target_Type", "Target_Level",
         "Poziom_roznica", "Anchor", "Podobienstwo",
     ]

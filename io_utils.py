@@ -4,7 +4,9 @@ crawl "Internal HTML" (eksport Screaming Frog, xlsx albo csv).
 
 Wszystko oparte o pandas/openpyxl - zaden z parserow nie zaklada konkretnej
 nazwy kolumny "na sztywno", tylko probuje rozpoznac najbardziej prawdopodobna
-kolumne (Original Url/Address/URL, Status Code, Indexability, H1, Breadcrumb_*).
+kolumne (Original Url/Address/URL, Status Code, Indexability, H1, Title,
+Breadcrumb_*). Title (opcjonalna) zasila ai_eval.py - ocene AI trafnosci
+warstwy embedding_podobienstwo (patrz linking_engine.PageRow.title).
 
 Kolumna URL: "Original Url" ma PIERWSZENSTWO przed "Address" (patrz
 URL_COLUMN_CANDIDATES). W eksportach Screaming Frog z List Mode "Address" bywa
@@ -46,6 +48,7 @@ URL_COLUMN_CANDIDATES = ["original url", "address", "url", "final url", "page ur
 STATUS_COLUMN_CANDIDATES = ["status code", "status_code", "statuscode", "http status"]
 INDEXABILITY_COLUMN_CANDIDATES = ["indexability"]
 H1_COLUMN_PREFIXES = ["h1"]
+TITLE_COLUMN_PREFIXES = ["title 1", "title"]
 BREADCRUMB_URL_PREFIX = "breadcrumb_url"
 BREADCRUMB_NAME_PREFIX = "breadcrumb_name"
 # Wylacznie ta jedna, konkretna kolumna (patrz docstring modulu) - dopasowanie
@@ -209,6 +212,7 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
     status_col = _find_column(columns, STATUS_COLUMN_CANDIDATES)
     indexability_col = _find_column(columns, INDEXABILITY_COLUMN_CANDIDATES)
     h1_col = _find_column(columns, H1_COLUMN_PREFIXES)
+    title_col = _find_column(columns, TITLE_COLUMN_PREFIXES)
     embedding_col = _find_column(columns, EMBEDDING_COLUMN_CANDIDATES)
 
     bc_url_cols = sorted(
@@ -246,6 +250,10 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
         if pd.isna(h1):
             h1 = None
 
+        title = r.get(title_col) if title_col else None
+        if pd.isna(title):
+            title = None
+
         bc_urls = tuple(
             str(r[c]).strip() for c in bc_url_cols if pd.notna(r.get(c)) and str(r[c]).strip()
         )
@@ -261,6 +269,7 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
                 "status_code": status_code,
                 "indexability": indexability,
                 "h1": h1,
+                "title": title,
                 "breadcrumb_urls": bc_urls,
                 "breadcrumb_names": bc_names,
                 "embedding": embedding,

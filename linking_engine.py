@@ -129,6 +129,7 @@ class PageRow:
     breadcrumb_names: tuple     # przodkowie + biezaca strona, w kolejnosci (L1..Ln)
     url_type: str                # category / filtered_category / brand / other
     embedding: tuple = ()         # wektor embeddingu tresci strony (opcjonalny, patrz io_utils)
+    title: Optional[str] = None   # <title> strony (opcjonalny) - zasila ai_eval.py
 
     @property
     def level(self) -> int:
@@ -229,6 +230,7 @@ def build_pages(
             breadcrumb_names=tuple(r.get("breadcrumb_names") or ()),
             url_type=url_type,
             embedding=tuple(r.get("embedding") or ()),
+            title=r.get("title"),
         )
         existing = seen.get(url)
         if existing is None or row.level > existing.level:

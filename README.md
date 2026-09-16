@@ -73,6 +73,7 @@ Screaming Frog exportuje dokladnie takie):
 | `Status Code` | np. 200, 301, 404 |
 | `Indexability` | `Indexable` / `Non-Indexable` |
 | `H1-1` (lub `H1`) | H1 strony - uzywane jako Anchor linku |
+| `Title 1` (lub `Title`) | tytul strony - OPCJONALNY, wymagany tylko do oceny AI (patrz nizej) |
 | `Breadcrumb_URL 1`, `Breadcrumb_URL 2`, ... | URL-e przodkow w breadcrumbie, w kolejnosci L1→Ln-1 |
 | `Breadcrumb_Name 1`, `Breadcrumb_Name 2`, ... | nazwy przodkow + biezacej strony jako ostatni element, w kolejnosci L1→Ln |
 
@@ -101,6 +102,26 @@ dowolna kolumna zawierajaca slowo "embedding") - wartosc to string typu
 eksportuje wtyczka do embeddingow w Screaming Frog. Zasila warstwe
 `embedding_podobienstwo` (patrz Reguly ponizej). Brak tej kolumny niczego nie
 psuje - reszta narzedzia dziala normalnie, po prostu bez tej warstwy.
+
+**Ocena AI trafnosci embedding_podobienstwo (opcjonalna):** embedding_podobienstwo
+to JEDYNA warstwa bez potwierdzenia strukturalnego (breadcrumb) - moze polaczyc
+tematycznie odlegle strony, ktore sa embeddingowo podobne przypadkiem (np.
+"Multicookery" z "Zamrazarkami"). Jesli podasz klucz API OpenAI (pole w UI,
+sekcja 2 - "Ocena AI trafnosci..."), kazda taka para dostaje ocene modelu
+(`gpt-5.4-mini-2026-03-17` domyslnie, konfigurowalny) na podstawie `Title` + `H1`
+obu stron: **TAK** / **NIE** / **MOŻE**. Wynik trafia do kolumny `Ocena_AI`
+zaraz obok `Rule` (patrz `ai_eval.py`). Pozostale reguly NIE sa oceniane przez
+AI - maja juz potwierdzenie po breadcrumbie. Blad zapytania (zly klucz, rate
+limit, brak sieci) nigdy nie przerywa analizy - dotkniete wiersze zostaja po
+prostu bez oceny. Wartosci domyslne w Secrets: `openai_api_key`, `openai_model`.
+
+Ocena idzie w tle (osobny watek, paczkami po 30 par) z wlasnym paskiem postepu
+w sekcji 3 - dzieki temu przycisk **⏹ Przerwij ocene AI** dziala naprawde w
+trakcie dzialania, nie tylko po zakonczeniu calej oceny (Streamlit nie
+przetwarza klikniec w trakcie jednego dlugiego, synchronicznego przebiegu
+skryptu). Przerwanie konczy biezaca paczke i od razu buduje pliki wynikowe z
+tym, co juz zdazylo zostac ocenione - reszta wierszy zostaje po prostu bez
+`Ocena_AI`, tak jak przy bledzie zapytania.
 
 **Sufiks w Anchor (opcjonalny):** jesli H1 (a wiec i Anchor w wynikach)
 konczy sie stalym dopiskiem (np. nazwa sklepu/marki), mozna go obciac polem
@@ -271,23 +292,29 @@ kiedys byl potrzebny, np. marka<->marka) jest ta sama: skopiuj wlasciwa
 jak w `build_brand_filter_candidates`, dopisz odwrotnosc od razu obok
 oryginalu w tej samej funkcji.
 
-## Haslo dostepu
+## Haslo dostepu i inne Secrets
 
 Aplikacja jest zabezpieczona hasłem (ekran logowania przed wgraniem plikow).
-Haslo ustawia sie przez **Secrets**, nie w kodzie:
+Haslo (i pozostale opcjonalne wartosci domyslne) ustawia sie przez **Secrets**,
+nie w kodzie:
 
 - **Streamlit Community Cloud**: wejdz w aplikacje -> **Settings -> Secrets** i
   wklej:
   ```
   password = "twoje-haslo"
+  anchor_suffix_to_strip = " w MediaMarkt"
+  openai_api_key = "sk-..."
+  openai_model = "gpt-5.4-mini-2026-03-17"
   ```
-  Zapisz - aplikacja sama sie zrestartuje z nowym haslem. Zmiana hasla pozniej
+  Zapisz - aplikacja sama sie zrestartuje z nowymi wartosciami. Zmiana pozniej
   = ta sama sciezka, bez zadnego deployu.
 - **Lokalnie**: stworz plik `.streamlit/secrets.toml` (w `.gitignore`, nigdy
   nie trafia do repo) z ta sama zawartoscia.
 
-Jesli haslo nie jest ustawione w Secrets, aplikacja pokazuje blad zamiast
+Tylko `password` jest wymagane - bez niego aplikacja pokazuje blad zamiast
 ekranu logowania (nie da sie jej przypadkiem zostawic bez zabezpieczenia).
+Pozostale klucze sa opcjonalne - to tylko wygodne domyslne wartosci dla pol w
+UI, ktore i tak mozna wpisac recznie za kazdym razem.
 
 ## Uruchomienie lokalne
 
@@ -315,9 +342,10 @@ app.py               - interfejs Streamlit (UI, wgrywanie plikow, przyciski)
 linking_engine.py     - czysta logika regul (bez zaleznosci od Streamlit)
 io_utils.py           - wczytywanie xlsx/csv/sitemap -> znormalizowane dane
 export.py             - budowa dwoch plikow xlsx wyjsciowych
+ai_eval.py             - integracja z OpenAI: ocena TAK/NIE/MOŻE dla embedding_podobienstwo
 requirements.txt
 .streamlit/config.toml
 ```
 
-`linking_engine.py` i `export.py` nie zaleza od Streamlit, wiec mozna je
-testowac/uzywac niezaleznie (np. w skrypcie CLI albo w notebooku).
+`linking_engine.py`, `export.py` i `ai_eval.py` nie zaleza od Streamlit, wiec
+mozna je testowac/uzywac niezaleznie (np. w skrypcie CLI albo w notebooku).
