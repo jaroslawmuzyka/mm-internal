@@ -7,7 +7,10 @@ Budowanie plikow wyjsciowych (xlsx) z gotowych kandydatow do linkowania:
      propozycje, z kazdej reguly, dla kategorii L1 jako Source_URL -
      przeniesione tu zamiast do zeszytow kandydatow, plus placeholder dla L1
      bez zadnych propozycji), L2_pod_L1_bez_siostr, Pominiete_zbyt_glebokie
-     (kandydaci odcieci limitem max_level_diff), Marka_wykluczona_generyczna
+     (kandydaci odcieci limitem max_level_diff), Pominiete_juz_na_stronie
+     (kandydaci odcieci bo Target_URL jest juz podlinkowany na stronie
+     Source_URL - menu glowne/boczne, box kategorii-facet, opis kategorii na
+     dole - patrz linking_engine._filter_existing_links), Marka_wykluczona_generyczna
      (kategorie z generycznym leafem, np. "Akcesoria", pominiete przy
      dopasowaniu marka 1-segmentowe), Wszystkie_adresy_wejsciowe (audyt: co
      dokladnie wgrano do narzedzia - URL / Typ / Zrodlo / Status Code /
@@ -134,6 +137,7 @@ def build_review_workbook(
     embedding_top_n: int | None = None,
     embedding_skipped: list[str] | None = None,
     all_input_urls: list[dict] | None = None,
+    cut_by_existing_link_candidates: list[dict] | None = None,
     progress: Callable[[str, int, int], None] | None = None,
 ) -> bytes:
     """
@@ -143,12 +147,18 @@ def build_review_workbook(
     po-komorce w openpyxl dla kilkunastu tysiecy wierszy potrafi zajac
     dziesiatki sekund) - nie w liczeniu regul/embeddingow, ktore trwa
     milisekundy nawet dla tysiecy stron.
+
+    `cut_by_existing_link_candidates`: kandydaci odcieci, bo Target_URL jest
+    juz podlinkowany na stronie Source_URL (menu glowne/boczne, box kategorii,
+    opis kategorii) - patrz linking_engine._filter_existing_links. Trafiaja do
+    osobnego arkusza `Pominiete_juz_na_stronie`, tak jak limit glebokosci.
     """
     cut_by_depth_candidates = cut_by_depth_candidates or []
     brand_generic_excluded = brand_generic_excluded or []
     l1_outbound_candidates = l1_outbound_candidates or []
     embedding_skipped = embedding_skipped or []
     all_input_urls = all_input_urls or []
+    cut_by_existing_link_candidates = cut_by_existing_link_candidates or []
 
     type_counts = Counter(p.url_type for p in pages)
     rule_counts = Counter()
@@ -262,6 +272,7 @@ def build_review_workbook(
         ("L1_do_uzupelnienia", l1_headers, l1_rows, True, None),
         ("L2_pod_L1_bez_siostr", l2_headers, l2_rows, False, None),
         ("Pominiete_zbyt_glebokie", depth_headers, cut_by_depth_candidates, True, None),
+        ("Pominiete_juz_na_stronie", depth_headers, cut_by_existing_link_candidates, True, None),
         ("Marka_wykluczona_generyczna", generic_headers, generic_rows, False, None),
         ("Wszystkie_adresy_wejsciowe", input_url_headers, input_url_rows, False, _style_input_url_row),
     ]
@@ -284,6 +295,8 @@ def build_review_workbook(
         _write_table(ws, headers, rows, color_target_by_rule=color_flag, extra_style=extra_style, on_progress=on_progress)
         if sheet_name == "Pominiete_zbyt_glebokie" and not rows:
             ws.append(["(brak - wszyscy kandydaci miesca sie w limicie glebokosci)"])
+        if sheet_name == "Pominiete_juz_na_stronie" and not rows:
+            ws.append(["(brak - albo checkboxy wylaczone, albo zaden kandydat nie byl juz podlinkowany na stronie)"])
         written_so_far += len(rows)
 
     ws3 = wb.create_sheet("Diagnostyka")
@@ -307,6 +320,8 @@ def build_review_workbook(
         ("", ""),
         ("Limit roznicy poziomow dla kategoria_podrzedna / filtr_podrzedny (Poziom_roznica)", max_level_diff),
         ("Kandydaci odcieci limitem glebokosci (patrz arkusz Pominiete_zbyt_glebokie)", len(cut_by_depth_candidates)),
+        ("Kandydaci odcieci bo link juz jest na stronie (patrz arkusz Pominiete_juz_na_stronie)",
+         len(cut_by_existing_link_candidates)),
         ("Kategorie wykluczone z dopasowania marka 1-segmentowe - nazwa generyczna "
          "(patrz arkusz Marka_wykluczona_generyczna)", len(brand_generic_excluded)),
         ("", ""),

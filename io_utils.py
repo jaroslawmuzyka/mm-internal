@@ -27,6 +27,18 @@ klamrowych), parsowany na tuple floatow. Zasila
 linking_engine.build_embedding_candidates (dodatkowa warstwa rekomendacji
 oparta o podobienstwo tresci). Brak tej kolumny nie przeszkadza w niczym
 innym - reszta narzedzia dziala normalnie, po prostu bez tej warstwy.
+
+Kolumna "Soft 404" (OPCJONALNA, Custom Search w Screaming Frog) - liczba
+wystapien szukanego stringa na stronie; 0 = nie jest soft-404, >=1 = jest
+(patrz linking_engine.PageRow.soft_404 / checkbox "Nie uwzgledniaj soft-404"
+w app.py).
+
+Kolumny existing_links_menu_main / existing_links_menu_left /
+existing_links_category_box / existing_links_bottom (OPCJONALNE, Custom
+JavaScript w Screaming Frog) - kazda to lista URL-i (jeden pod drugim w
+jednej komorce) juz podlinkowanych na stronie z danego miejsca. Zasilaja
+checkboxy w app.py, ktore wykluczaja z kandydatow propozycje linkow, ktore
+juz i tak sa na stronie.
 """
 
 from __future__ import annotations
@@ -55,6 +67,17 @@ BREADCRUMB_NAME_PREFIX = "breadcrumb_name"
 # czesciowe w _find_column daje tolerancje na wielkosc liter / dodatkowe
 # spacje, ale NIE na inna nazwe. Kolumna OPCJONALNA.
 EMBEDDING_COLUMN_CANDIDATES = ["extract embeddings from page content"]
+# Custom Search w Screaming Frog (patrz "Konfiguracja Screaming Frog" w app.py) -
+# liczba wystapien szukanego stringa (np. elementu graficznego strony bledu) na
+# stronie. 0 = nie jest soft-404, >=1 = jest. Kolumna OPCJONALNA.
+SOFT_404_COLUMN_CANDIDATES = ["soft 404"]
+# Custom JavaScript w Screaming Frog (patrz app.py) - kazda kolumna to lista
+# URL-i (jeden pod drugim w jednej komorce) juz podlinkowanych na stronie z
+# danego miejsca. Wszystkie OPCJONALNE.
+EXISTING_LINKS_MENU_MAIN_COLUMN_CANDIDATES = ["existing_links_menu_main"]
+EXISTING_LINKS_MENU_LEFT_COLUMN_CANDIDATES = ["existing_links_menu_left"]
+EXISTING_LINKS_CATEGORY_BOX_COLUMN_CANDIDATES = ["existing_links_category_box"]
+EXISTING_LINKS_BOTTOM_COLUMN_CANDIDATES = ["existing_links_bottom"]
 
 
 def _norm(s: str) -> str:
@@ -106,6 +129,35 @@ def _parse_embedding(raw) -> tuple:
             return ()
         return values
     except (ValueError, TypeError, OverflowError):
+        return ()
+
+
+def _parse_soft_404(raw) -> bool:
+    """Kolumna 'Soft 404' (Custom Search w Screaming Frog) to liczba wystapien -
+    0 = nie jest soft-404, >=1 = jest. Nigdy nie rzuca wyjatku (jak _parse_embedding) -
+    puste/dziwne wartosci = "nie jest soft-404", nie blokuje reszty analizy."""
+    try:
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            return False
+        return float(raw) >= 1
+    except (ValueError, TypeError):
+        return False
+
+
+def _parse_link_list(raw) -> tuple:
+    """Kolumny existing_links_* (Custom JavaScript w Screaming Frog) - jeden URL
+    na linie w jednej komorce. Zwraca tuple niepustych, przycietych linii.
+    Nigdy nie rzuca wyjatku (jak _parse_embedding) - puste/dziwne wartosci =
+    pusta krotka, ta strona po prostu nie ma zadnych znanych "juz istniejacych"
+    linkow z tego miejsca."""
+    try:
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            return ()
+        s = str(raw).strip()
+        if not s or s.lower() == "nan":
+            return ()
+        return tuple(line.strip() for line in s.splitlines() if line.strip())
+    except (ValueError, TypeError):
         return ()
 
 
@@ -214,6 +266,11 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
     h1_col = _find_column(columns, H1_COLUMN_PREFIXES)
     title_col = _find_column(columns, TITLE_COLUMN_PREFIXES)
     embedding_col = _find_column(columns, EMBEDDING_COLUMN_CANDIDATES)
+    soft_404_col = _find_column(columns, SOFT_404_COLUMN_CANDIDATES)
+    menu_main_col = _find_column(columns, EXISTING_LINKS_MENU_MAIN_COLUMN_CANDIDATES)
+    menu_left_col = _find_column(columns, EXISTING_LINKS_MENU_LEFT_COLUMN_CANDIDATES)
+    category_box_col = _find_column(columns, EXISTING_LINKS_CATEGORY_BOX_COLUMN_CANDIDATES)
+    bottom_links_col = _find_column(columns, EXISTING_LINKS_BOTTOM_COLUMN_CANDIDATES)
 
     bc_url_cols = sorted(
         [c for c in columns if _norm(c).replace(" ", "_").startswith(BREADCRUMB_URL_PREFIX)],
@@ -262,6 +319,11 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
         )
 
         embedding = _parse_embedding(r.get(embedding_col)) if embedding_col else ()
+        soft_404 = _parse_soft_404(r.get(soft_404_col)) if soft_404_col else False
+        existing_links_menu_main = _parse_link_list(r.get(menu_main_col)) if menu_main_col else ()
+        existing_links_menu_left = _parse_link_list(r.get(menu_left_col)) if menu_left_col else ()
+        existing_links_category_box = _parse_link_list(r.get(category_box_col)) if category_box_col else ()
+        existing_links_bottom = _parse_link_list(r.get(bottom_links_col)) if bottom_links_col else ()
 
         rows.append(
             {
@@ -273,6 +335,11 @@ def read_internal_html_file(uploaded_file) -> list[dict]:
                 "breadcrumb_urls": bc_urls,
                 "breadcrumb_names": bc_names,
                 "embedding": embedding,
+                "soft_404": soft_404,
+                "existing_links_menu_main": existing_links_menu_main,
+                "existing_links_menu_left": existing_links_menu_left,
+                "existing_links_category_box": existing_links_category_box,
+                "existing_links_bottom": existing_links_bottom,
             }
         )
     return rows

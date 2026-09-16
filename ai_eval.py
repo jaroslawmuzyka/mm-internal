@@ -114,6 +114,7 @@ def evaluate_embedding_candidates(
     batch_size: int = DEFAULT_BATCH_SIZE,
     progress: Callable[[int, int], None] | None = None,
     stop_event: threading.Event | None = None,
+    results_holder: dict[tuple, str] | None = None,
 ) -> list[str]:
     """
     Mutuje kazdy dict w `candidates` IN PLACE: dopisuje `Ocena_AI` (TAK/NIE/MOŻE)
@@ -128,6 +129,15 @@ def evaluate_embedding_candidates(
     granularne co ok. `batch_size` wierszy, nie natychmiastowe). Gdy ustawiony,
     petla konczy sie od razu - wiersze, ktore nie zdazyly byc ocenione, po
     prostu zostaja bez Ocena_AI, tak jak przy bledzie zapytania.
+
+    `results_holder`: opcjonalny dict {(Source_URL, Target_URL): ocena},
+    dopisywany OBOK mutacji in-place - niezalezny "plan B" na wypadek, gdyby
+    watek w tle i glowny skrypt (po st.rerun/session_state) z jakiegos powodu
+    nie dzielily juz tych samych obiektow dict (np. na Streamlit Community
+    Cloud - zgloszony przypadek, gdzie podsumowanie w UI mialo poprawne
+    oceny, ale plik xlsx wychodzil z pusta kolumna Ocena_AI). app.py uzywa
+    tego do jawnego "doklejenia" ocen po kluczu tuz przed budowa plikow,
+    zamiast polegac WYLACZNIE na mutacji in-place.
 
     Zwraca liste komunikatow bledow (pusta lista = bez problemow). Blad
     pojedynczego zapytania NIE przerywa reszty - dotkniete wiersze zostaja
@@ -167,7 +177,10 @@ def evaluate_embedding_candidates(
                 errors.append(f"Blad zapytania do OpenAI (wiersze {i + 1}-{i + len(chunk)}): {e}")
                 verdicts = {}
             for j, c in rows_by_id.items():
-                c[AI_EVAL_COLUMN] = verdicts.get(j, "")
+                verdict = verdicts.get(j, "")
+                c[AI_EVAL_COLUMN] = verdict
+                if results_holder is not None:
+                    results_holder[(c.get("Source_URL"), c.get("Target_URL"))] = verdict
 
         done += len(chunk)
         if progress:

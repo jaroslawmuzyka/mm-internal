@@ -131,7 +131,9 @@ with st.expander("Jak to dziala? (kliknij, zeby rozwinac)", expanded=False):
    `Extract embeddings from page content` zasila dodatkowa warstwe rekomendacji
    embedding_podobienstwo (patrz nizej) - jej brak niczego nie psuje, narzedzie dziala normalnie
    bez tej warstwy.
-3. Zaznaczasz wykluczenia (3xx / 4xx / noindex), ustawiasz suwaki i klikasz **Uruchom analize**.
+3. Zaznaczasz wykluczenia (3xx / 4xx / noindex / soft-404, opcjonalnie tez linki juz istniejace
+   na stronie - menu glowne/boczne/box kategorii/opis kategorii), ustawiasz suwaki i klikasz
+   **Uruchom analize**.
 4. Dostajesz dwa pliki: pelna liste kandydatow do oceny (rozbita na **3 zeszyty wg tego, KTO
    linkuje**: `Kandydaci do link. (kategorie)`, `(marki)`, `(filtry)` - patrz sekcja Reguly
    ponizej) oraz gotowa macierz do wgrania w Contentful - **tak samo rozbita na 3 zeszyty**
@@ -262,15 +264,22 @@ kolumny, ktorych to narzedzie potrzebuje.
   - to narzedzie samo wybiera `Original Url`, jesli jest dostepna (patrz sekcja 2 powyzej).
 
 **2. Breadcrumb (Custom Extraction):**
-`Config -> Custom -> Extraction`. Dodaj **dwa** ekstraktory typu XPath:
-- Jeden zwracajacy WSZYSTKIE URL-e elementow breadcrumba naraz jako liste, np.
-  `//nav[contains(@class,"breadcrumb")]//a/@href` (dopasuj XPath do struktury DOM swojej
-  strony) - nazwij go np. `Breadcrumb_URL`. Screaming Frog sam ponumeruje wyniki w kolumnach
-  wyjsciowych (`Breadcrumb_URL 1`, `Breadcrumb_URL 2`, ...).
-- Drugi analogicznie dla nazw (tekst zamiast `href`), np.
-  `//nav[contains(@class,"breadcrumb")]//a/text() | //nav[contains(@class,"breadcrumb")]//span[last()]/text()`
-  - nazwij go `Breadcrumb_Name` (musi zawierac TEZ biezaca strone jako ostatni element, nie
-  tylko przodkow - stad dodatkowy warunek na ostatni element bez linku).
+`Config -> Custom -> Extraction`. Dodaj **dwa** ekstraktory typu XPath. Przyklad z dzialajacej
+konfiguracji (PODMIEN `twoja-domena.pl` i selektor `nav` na wlasne):
+- Jeden zwracajacy WSZYSTKIE URL-e elementow breadcrumba naraz jako liste:
+  `//nav[@data-test="breadcrumb-ul"]/ol/li[position()>1]/a[not(@href="https://twoja-domena.pl/marki")]/@href`
+  - nazwij go **`Breadcrumb_URL`**. Screaming Frog sam ponumeruje wyniki w kolumnach
+  wyjsciowych (`Breadcrumb_URL 1`, `Breadcrumb_URL 2`, ...). Warunek `not(@href=...)` wyklucza
+  z breadcrumba ogolny link do "strefy marek" (jesli Twoja strona ma cos podobnego w
+  breadcrumbie) - usun ten warunek, jesli nie jest potrzebny.
+- Drugi analogicznie dla nazw (tekst zamiast `href`):
+  `//nav[@data-test="breadcrumb-ul"]/ol/li[position()>1]/a[not(@href="https://twoja-domena.pl/marki")]/span[not(@aria-hidden)]/text() | //nav[@data-test="breadcrumb-ul"]/ol/li[position()>1]/div[@aria-current="true"]/span[not(@aria-hidden)]/text()`
+  - nazwij go **`Breadcrumb_Name`**. Druga czesc warunku (za `|`, `div[@aria-current="true"]`)
+  lapie BIEZACA strone w breadcrumbie - w wielu nowoczesnych komponentach UI ostatni segment
+  (biezaca strona) nie jest linkiem `<a>` tylko zwyklym elementem z atrybutem
+  `aria-current="true"`, wiec bez tego warunku ostatni element breadcrumba (czyli nazwa
+  biezacej strony) by sie zgubil. `span[not(@aria-hidden)]` pomija zdublowany, ukryty tekst
+  dla czytnikow ekranu (tez typowe w nowoczesnych komponentach).
 - **Wazne zalozenie, na ktorym opiera sie regula filtr_wlasny/filtr_tego_samego_poziomu/
   filtr_podrzedny:** strona z parametrem/fasetem (np. `?brand=PHILIPS`) musi miec **identyczny**
   breadcrumb jak jej kategoria bazowa. Jesli Twoja strona zmienia breadcrumb dla stron
@@ -287,17 +296,151 @@ Nazwij ten ekstraktor **dokladnie** `Extract embeddings from page content` - nar
 rozpoznaje TYLKO te jedna, konkretna nazwe kolumny (celowo, zeby nie wciagnac przypadkiem
 innej kolumny). Bez tego kroku narzedzie dziala normalnie, po prostu bez tej warstwy.
 
-**4. Eksport:**
+**4. Linki wewnetrzne z konkretnych miejsc na stronie (Custom JavaScript, opcjonalnie):**
+`Config -> Custom -> Extraction`, cztery osobne ekstraktory typu **Custom JavaScript** - kazdy
+zbiera linki wewnetrzne (tylko `twoja-domena.pl` - PODMIEN na wlasna domene) z INNEGO miejsca
+na stronie, jeden pod drugim w jednej komorce. Te dane NIE sa jeszcze wykorzystywane przez
+regoly linkowania w tym narzedziu (to osobny etap, do przyszlego uzycia) - na razie sa tylko
+zbierane do pliku Internal HTML.
+
+`existing_links_menu_main` (poziomy pasek nawigacji pod naglowkiem):
+```js
+var container = document.querySelector('nav[aria-label="Main Navigation"]');
+if (!container) { return seoSpider.data(''); }
+
+var links = [];
+
+Array.prototype.forEach.call(container.querySelectorAll('ul[role="menubar"] a[href]'), function (a) {
+  var href = a.getAttribute('href');
+  if (!href) { return; }
+  var abs;
+  try {
+    abs = new URL(href, document.location.href).href;
+  } catch (e) {
+    return;
+  }
+  if (abs.indexOf('twoja-domena.pl') === -1) { return; }
+  links.push(abs);
+});
+
+return seoSpider.data(links.join('\n'));
+```
+
+`existing_links_menu_left` (wysuwane menu "Kategorie"):
+```js
+var container = document.getElementById('app-header-category-nav-id');
+if (!container) { return seoSpider.data(''); }
+
+var links = [];
+
+Array.prototype.forEach.call(container.querySelectorAll('a[href]'), function (a) {
+  var href = a.getAttribute('href');
+  if (!href) { return; }
+  var abs;
+  try {
+    abs = new URL(href, document.location.href).href;
+  } catch (e) {
+    return;
+  }
+  if (abs.indexOf('twoja-domena.pl') === -1) { return; }
+  links.push(abs);
+});
+
+return seoSpider.data(links.join('\n'));
+```
+
+`existing_links_category_box` (drzewko filtrow kategorii, tylko na stronach listingowych):
+```js
+var container = document.querySelector('details[data-test="facet-tree-category"]');
+if (!container) { return seoSpider.data(''); }
+
+var links = [];
+
+Array.prototype.forEach.call(container.querySelectorAll('a[href]'), function (a) {
+  var href = a.getAttribute('href');
+  if (!href) { return; }
+  var abs;
+  try {
+    abs = new URL(href, document.location.href).href;
+  } catch (e) {
+    return;
+  }
+  if (abs.indexOf('twoja-domena.pl') === -1) { return; }
+  links.push(abs);
+});
+
+return seoSpider.data(links.join('\n'));
+```
+
+`existing_links_bottom` (blok tresci/linkow na dole strony kategorii):
+```js
+var container = document.querySelector('aside#category-bottom');
+if (!container) { return seoSpider.data(''); }
+
+var links = [];
+
+Array.prototype.forEach.call(container.querySelectorAll('a[href]'), function (a) {
+  var href = a.getAttribute('href');
+  if (!href) { return; }
+  var abs;
+  try {
+    abs = new URL(href, document.location.href).href;
+  } catch (e) {
+    return;
+  }
+  if (abs.indexOf('twoja-domena.pl') === -1) { return; }
+  links.push(abs);
+});
+
+return seoSpider.data(links.join('\n'));
+```
+
+Dopasuj selektor kontenera (`document.querySelector(...)` / `getElementById(...)`) w kazdym
+skrypcie do wlasnej struktury HTML - powyzsze sa przykladem z konkretnej strony i pewnie nie
+zadzialaja "z automatu" na innym sklepie. **Uwaga: eksport do .xlsx ma limit 32 767 znakow na
+komorke** - jesli ktoras z tych list linkow jest bardzo dluga (np. rozbudowane mega-menu),
+Screaming Frog obetnie zawartosc komorki z komunikatem "Data too large for file format".
+Rozwiazanie: eksportuj Internal HTML jako **.csv** zamiast .xlsx (narzedzie obsluguje oba
+formaty, a .csv nie ma tego limitu).
+
+**5. Custom Search: wykrywanie stron soft-404 (opcjonalnie):**
+`Config -> Custom -> Search`, dodaj wpis: **Search** = `404_Media.svg`, **Filter** = `Contains`
+(dopasuj do wlasnej strony bledu - to przyklad konkretnego elementu graficznego, ktory
+Twoja strona bledu osadza w HTML).
+
+Chodzi o strony typu **soft-404**: zwracaja HTTP 200 (wygladaja jak normalna, dzialajaca
+strona - Status Code i Indexability nie zlapia tego problemu), ale w rzeczywistosci pokazuja
+uzytkownikowi komunikat "nie znaleziono strony" (typowy przypadek: usunieta/przeniesiona
+kategoria albo filtr, ktora serwer i tak odpowiada kodem 200 zamiast prawdziwego 404). Jesli
+szablon takiej strony w Twoim sklepie osadza konkretny, unikalny element (np. plik graficzny
+`404_Media.svg`, ktory nie wystepuje na normalnych stronach), Custom Search go wylapie - w
+eksporcie pojawi sie dodatkowa kolumna z wynikiem wyszukiwania. Odfiltruj/usun takie adresy
+PRZED wgraniem Internal HTML do tego narzedzia (obecny mechanizm wykluczen w sekcji 2 ponizej,
+oparty o Status Code/Indexability, ich nie zlapie - to znany, jeszcze nie zautomatyzowany
+przypadek).
+
+**6. Eksport:**
 Po zakonczeniu crawla: zakladka **Internal** (filtr HTML) -> **Export** (albo
 `Bulk Export -> Web -> All`), format `.xlsx` lub `.csv`. Upewnij sie, ze w eksporcie sa
 kolumny: `Address`/`Original Url`, `Status Code`, `Indexability`, `H1-1`, `Title 1`
 (opcjonalna, ale wymagana do oceny AI - patrz nizej), `Breadcrumb_URL 1..N`,
 `Breadcrumb_Name 1..N` i (opcjonalnie) `Extract embeddings from page content`.
 
-**5. Noindex a filtry:**
+**7. Noindex a filtry:**
 Fasety/filtry czesto maja `noindex, follow` (celowo, zeby nie rozdmuchiwac indeksu) - to NIE
 znaczy, ze nie warto do nich linkowac wewnetrznie. Jesli chcesz uwzglednic takie strony w
 analizie, odznacz checkbox "Nie uwzgledniaj noindex" w sekcji 2 ponizej.
+        """
+    )
+
+with st.expander("Proces przygotowania danych - kolejnosc krokow (kliknij, zeby rozwinac)", expanded=False):
+    st.markdown(
+        """
+1) Pobierz sitemapy
+2) Wrzuc w narzedzie do ekstrakcji linkow z sitemap
+3) Usun z sitemap content adresy dotyczace tylko kategorii na blogu
+4) Ustaw Screaming Frog i przecrawluj wszystkie pozostale adresy
+5) Wrzuc wszystkie pliki do tego narzedzia
         """
     )
 
@@ -313,14 +456,53 @@ with col2:
     )
 
 st.header("2. Wykluczenia")
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     exclude_3xx = st.checkbox("Nie uwzgledniaj 3xx (przekierowania)", value=True)
 with c2:
     exclude_4xx = st.checkbox("Nie uwzgledniaj 4xx (nie znaleziono)", value=True)
 with c3:
     exclude_noindex = st.checkbox("Nie uwzgledniaj noindex (Non-Indexable)", value=True)
+with c4:
+    exclude_soft_404 = st.checkbox(
+        "Nie uwzgledniaj soft-404",
+        value=True,
+        help=(
+            "Strony, ktore zwracaja HTTP 200 (wygladaja jak normalna strona - Status Code i "
+            "Indexability tego NIE zlapia), ale w rzeczywistosci pokazuja komunikat 'nie "
+            "znaleziono'. Patrz kolumna 'Soft 404' (Custom Search w Screaming Frog, zakladka "
+            "'Konfiguracja Screaming Frog' ponizej) - 0 = nie jest soft-404, 1 lub wiecej = "
+            "jest. Brak tej kolumny w pliku Internal HTML nie przeszkadza - checkbox po prostu "
+            "nie ma wtedy nic do wykluczenia."
+        ),
+    )
 st.caption("Strony z kodem 5xx sa wykluczane zawsze - to nigdy nie jest dobry kandydat na link.")
+
+st.subheader("Linki wewnetrzne juz istniejace na stronie (opcjonalnie)")
+st.caption(
+    "Jesli proponowany link (Target_URL) jest JUZ podlinkowany na stronie zrodlowej w jednym "
+    "z ponizszych miejsc (patrz Custom JavaScript w zakladce 'Konfiguracja Screaming Frog' "
+    "ponizej), taka propozycja jest zbedna - trafia do arkusza 'Pominiete_juz_na_stronie' "
+    "zamiast do glownej listy kandydatow. Brak ktorejkolwiek z tych kolumn w pliku Internal "
+    "HTML nie przeszkadza - odpowiadajacy checkbox po prostu nie ma wtedy nic do wykluczenia."
+)
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    exclude_existing_menu_main = st.checkbox(
+        "Nie uwzgledniaj stron podlinkowanych w menu glownym", value=True
+    )
+with m2:
+    exclude_existing_menu_left = st.checkbox(
+        "Nie uwzgledniaj adresow z menu bocznego", value=True
+    )
+with m3:
+    exclude_existing_category_box = st.checkbox(
+        "Nie uwzgledniaj adresow z menu kategorii (nawigacja fasetowa)", value=True
+    )
+with m4:
+    exclude_existing_bottom = st.checkbox(
+        "Nie uwzgledniaj adresow dodanych juz w opisie kategorii (bottom)", value=True
+    )
 
 max_level_diff = st.slider(
     "Maksymalna roznica poziomow dla kategoria_podrzedna / filtr_podrzedny",
@@ -396,14 +578,29 @@ st.caption(
     "Przy duzej liczbie propozycji (wysoki suwak embedding_top_n powyzej) moze to zajac dluzsza chwile."
 )
 
-def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors):
+def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors, ai_results=None):
     """
     Wspolny "finisz" po analizie - Podsumowanie + budowa 2 plikow xlsx +
     zapis do session_state (skad je pobiera sekcja '4. Pobierz pliki').
     Wywolywane w dwoch miejscach: od razu po run_all_rules (gdy ocena AI jest
     wylaczona/pominieta) albo dopiero po zakonczeniu watku oceny AI w tle
     (patrz sekcja 3. Analiza nizej).
+
+    `ai_results`: opcjonalny dict {(Source_URL, Target_URL): ocena} z watku
+    oceny AI (patrz ai_eval.evaluate_embedding_candidates - results_holder).
+    Watek mutuje kandydatow IN PLACE (powinno wystarczyc samo w sobie), ale
+    TUTAJ dodatkowo jawnie "doklejamy" oceny po kluczu jako zabezpieczenie -
+    zgloszony przypadek na Streamlit Community Cloud, gdzie podsumowanie w UI
+    mialo poprawne oceny, ale plik xlsx wychodzil z pusta kolumna Ocena_AI
+    (mutacja in-place najwyrazniej nie zawsze przezywa watek + kolejne
+    st.rerun/session_state na tej platformie).
     """
+    if ai_results:
+        for c in all_candidates + result["l1_outbound_candidates"]:
+            key = (c.get("Source_URL"), c.get("Target_URL"))
+            if key in ai_results:
+                c["Ocena_AI"] = ai_results[key]
+
     if ai_errors:
         st.warning(
             "Niektore zapytania do OpenAI nie powiodly sie - dotkniete wiersze zostaly "
@@ -435,6 +632,11 @@ def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_url
     m8.metric(
         "Nowe propozycje z warstwy embedding_podobienstwo",
         len(result["embedding_candidates"]),
+    )
+    m9, _ = st.columns(2)
+    m9.metric(
+        "Odcieci - link juz na stronie (arkusz Pominiete_juz_na_stronie)",
+        len(result["cut_by_existing_link_candidates"]),
     )
 
     embedding_rows_all = [
@@ -485,6 +687,7 @@ def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_url
         max_level_diff=result["max_level_diff"],
         brand_generic_excluded=result["brand_generic_excluded"],
         l1_outbound_candidates=result["l1_outbound_candidates"],
+        cut_by_existing_link_candidates=result["cut_by_existing_link_candidates"],
         embedding_top_n=result["embedding_top_n"],
         embedding_skipped=result["embedding_skipped"],
         all_input_urls=all_input_urls,
@@ -563,6 +766,7 @@ if run_clicked and not _ai_thread_running():
                 exclude_3xx=exclude_3xx,
                 exclude_4xx=exclude_4xx,
                 exclude_noindex=exclude_noindex,
+                exclude_soft_404=exclude_soft_404,
             )
             if not pages:
                 st.error(
@@ -577,6 +781,10 @@ if run_clicked and not _ai_thread_running():
                 max_level_diff=max_level_diff,
                 embedding_top_n=embedding_top_n,
                 anchor_suffix_to_strip=anchor_suffix_to_strip.strip(),
+                exclude_existing_menu_main=exclude_existing_menu_main,
+                exclude_existing_menu_left=exclude_existing_menu_left,
+                exclude_existing_category_box=exclude_existing_category_box,
+                exclude_existing_bottom=exclude_existing_bottom,
             )
             all_candidates = result["all_candidates"]
 
@@ -585,6 +793,7 @@ if run_clicked and not _ai_thread_running():
         st.session_state.pop("ai_stop_event", None)
         st.session_state.pop("ai_progress_holder", None)
         st.session_state.pop("ai_errors_holder", None)
+        st.session_state.pop("ai_results_holder", None)
 
         ai_thread_started = False
         if use_ai_eval and openai_api_key:
@@ -603,15 +812,18 @@ if run_clicked and not _ai_thread_running():
                 stop_event = threading.Event()
                 progress_holder = {"done": 0, "total": len(embedding_rows_to_eval)}
                 errors_holder = []
+                results_holder: dict[tuple, str] = {}
                 model_to_use = openai_model.strip() or ai_eval.DEFAULT_MODEL
 
                 def _ai_worker(
                     rows=embedding_rows_to_eval, pbu=page_by_url, key=openai_api_key,
                     model=model_to_use, ev=stop_event, ph=progress_holder, eh=errors_holder,
+                    rh=results_holder,
                 ):
                     errs = ai_eval.evaluate_embedding_candidates(
                         rows, pbu, api_key=key, model=model, stop_event=ev,
                         progress=lambda d, t: ph.update(done=d, total=t),
+                        results_holder=rh,
                     )
                     eh.extend(errs)
 
@@ -620,6 +832,7 @@ if run_clicked and not _ai_thread_running():
                 st.session_state["ai_stop_event"] = stop_event
                 st.session_state["ai_progress_holder"] = progress_holder
                 st.session_state["ai_errors_holder"] = errors_holder
+                st.session_state["ai_results_holder"] = results_holder
                 thread.start()
                 ai_thread_started = True
 
@@ -665,6 +878,7 @@ elif st.session_state.get("pending_result") is not None:
     # odswiezeniach np. po kliknieciu "Pobierz" ta sekcja ma juz nie wracac -
     # dokladnie jak wczesniej, kiedy to wszystko bylo w jednym bloku run_clicked).
     ai_errors = st.session_state.pop("ai_errors_holder", [])
+    ai_results = st.session_state.pop("ai_results_holder", None)
     st.session_state.pop("ai_thread", None)
     st.session_state.pop("ai_stop_event", None)
     st.session_state.pop("ai_progress_holder", None)
@@ -673,7 +887,7 @@ elif st.session_state.get("pending_result") is not None:
     all_candidates = st.session_state.pop("pending_all_candidates")
     all_input_urls = st.session_state.pop("pending_all_input_urls")
 
-    _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors)
+    _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors, ai_results)
 
 if "review_bytes" in st.session_state:
     st.header("4. Pobierz pliki")

@@ -130,6 +130,17 @@ class PageRow:
     url_type: str                # category / filtered_category / brand / other
     embedding: tuple = ()         # wektor embeddingu tresci strony (opcjonalny, patrz io_utils)
     title: Optional[str] = None   # <title> strony (opcjonalny) - zasila ai_eval.py
+    soft_404: bool = False        # patrz io_utils.SOFT_404_COLUMN_CANDIDATES (opcjonalna)
+    # Listy URL-i juz podlinkowanych na tej stronie z poszczegolnych miejsc
+    # (menu glowne / menu boczne / box kategorii-facet / opis kategorii na
+    # dole) - patrz io_utils.EXISTING_LINKS_*_COLUMN_CANDIDATES (opcjonalne,
+    # Custom JavaScript w Screaming Frog). Uzywane w run_all_rules do
+    # wykluczenia kandydatow, ktore i tak juz sa na stronie (patrz
+    # _filter_existing_links).
+    existing_links_menu_main: tuple = ()
+    existing_links_menu_left: tuple = ()
+    existing_links_category_box: tuple = ()
+    existing_links_bottom: tuple = ()
 
     @property
     def level(self) -> int:
@@ -143,7 +154,13 @@ class PageRow:
     def direct_parent_url(self) -> Optional[str]:
         return self.breadcrumb_urls[-1] if self.breadcrumb_urls else None
 
-    def is_eligible(self, exclude_3xx: bool, exclude_4xx: bool, exclude_noindex: bool) -> bool:
+    def is_eligible(
+        self,
+        exclude_3xx: bool,
+        exclude_4xx: bool,
+        exclude_noindex: bool,
+        exclude_soft_404: bool = False,
+    ) -> bool:
         if self.level <= 0:
             return False
         if self.status_code is None:
@@ -156,6 +173,10 @@ class PageRow:
             return False
         if self.status_code >= 500:
             # Bledy serwera nigdy nie sa dobrym kandydatem na link
+            return False
+        if exclude_soft_404 and self.soft_404:
+            # HTTP 200, ale strona faktycznie pokazuje "nie znaleziono" - patrz
+            # io_utils.SOFT_404_COLUMN_CANDIDATES
             return False
         return True
 
@@ -186,6 +207,7 @@ def build_pages(
     exclude_3xx: bool = True,
     exclude_4xx: bool = True,
     exclude_noindex: bool = True,
+    exclude_soft_404: bool = False,
 ) -> list[PageRow]:
     """
     internal_html_rows: lista dictow z kluczami (co najmniej):
@@ -231,13 +253,21 @@ def build_pages(
             url_type=url_type,
             embedding=tuple(r.get("embedding") or ()),
             title=r.get("title"),
+            soft_404=bool(r.get("soft_404", False)),
+            existing_links_menu_main=tuple(r.get("existing_links_menu_main") or ()),
+            existing_links_menu_left=tuple(r.get("existing_links_menu_left") or ()),
+            existing_links_category_box=tuple(r.get("existing_links_category_box") or ()),
+            existing_links_bottom=tuple(r.get("existing_links_bottom") or ()),
         )
         existing = seen.get(url)
         if existing is None or row.level > existing.level:
             seen[url] = row
 
     pages = list(seen.values())
-    return [p for p in pages if p.is_eligible(exclude_3xx, exclude_4xx, exclude_noindex)]
+    return [
+        p for p in pages
+        if p.is_eligible(exclude_3xx, exclude_4xx, exclude_noindex, exclude_soft_404)
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -782,11 +812,53 @@ def _strip_anchor_suffix(candidates: list[dict], suffix: str) -> list[dict]:
     return out
 
 
+def _filter_existing_links(
+    candidates: list[dict],
+    page_by_url: dict,
+    exclude_menu_main: bool,
+    exclude_menu_left: bool,
+    exclude_category_box: bool,
+    exclude_bottom: bool,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Rozdziela kandydatow na (zostaja, odcieci) - odcina te, ktorych Target_URL
+    jest JUZ podlinkowany na stronie Source_URL w jednym z zaznaczonych miejsc
+    (menu glowne / menu boczne / box kategorii-facet / opis kategorii na dole -
+    patrz PageRow.existing_links_*, ktore zasila io_utils z Custom JavaScript w
+    Screaming Frog). Propozycja linku, ktory i tak juz jest na stronie, jest
+    zbedna. Nic nie ginie bez sladu - odciete trafiaja do osobnej listy
+    (arkusz Pominiete_juz_na_stronie w export.py), tak jak przy limicie
+    glebokosci (patrz _split_by_depth_limit).
+
+    Strona bez danego zrodla danych (brak kolumny w Internal HTML -> pusta
+    krotka existing_links_*) po prostu nigdy nie ma tam trafienia - checkbox
+    wtedy nic nie wycina, reszta narzedzia dziala normalnie.
+    """
+    if not (exclude_menu_main or exclude_menu_left or exclude_category_box or exclude_bottom):
+        return candidates, []
+    kept, cut = [], []
+    for c in candidates:
+        source = page_by_url.get(c["Source_URL"])
+        target_url = c["Target_URL"]
+        already_linked = source is not None and (
+            (exclude_menu_main and target_url in source.existing_links_menu_main)
+            or (exclude_menu_left and target_url in source.existing_links_menu_left)
+            or (exclude_category_box and target_url in source.existing_links_category_box)
+            or (exclude_bottom and target_url in source.existing_links_bottom)
+        )
+        (cut if already_linked else kept).append(c)
+    return kept, cut
+
+
 def run_all_rules(
     pages: list[PageRow],
     max_level_diff: int = 1,
     embedding_top_n: int = EMBEDDING_TOP_N_DEFAULT,
     anchor_suffix_to_strip: str = "",
+    exclude_existing_menu_main: bool = False,
+    exclude_existing_menu_left: bool = False,
+    exclude_existing_category_box: bool = False,
+    exclude_existing_bottom: bool = False,
 ) -> dict:
     """
     Uruchamia wszystkie reguly i zwraca slownik z surowymi/pomocniczymi wynikami.
@@ -802,6 +874,12 @@ def run_all_rules(
 
     `anchor_suffix_to_strip`: opcjonalny sufiks usuwany z konca kazdego Anchora
     (patrz _strip_anchor_suffix) - np. stale dopisywana nazwa sklepu w H1.
+
+    `exclude_existing_menu_main` / `_menu_left` / `_category_box` / `_bottom`:
+    wykluczaja kandydatow, ktorych Target_URL jest juz podlinkowany na stronie
+    Source_URL z odpowiedniego miejsca (patrz _filter_existing_links) -
+    odciete trafiaja do `cut_by_existing_link_candidates`, nic nie ginie bez
+    sladu.
 
     Kategorie L1 (departamenty najwyzszego poziomu) NIGDY nie wystepuja jako
     Source_URL w `all_candidates` / `cut_by_depth_candidates` - wszystkie ich
@@ -847,9 +925,22 @@ def run_all_rules(
     cut_by_depth_candidates = _strip_anchor_suffix(cut_by_depth_candidates, anchor_suffix_to_strip)
     l1_outbound_candidates = _strip_anchor_suffix(l1_outbound_candidates, anchor_suffix_to_strip)
 
+    page_by_url = {p.url: p for p in pages}
+    existing_link_args = (
+        exclude_existing_menu_main, exclude_existing_menu_left,
+        exclude_existing_category_box, exclude_existing_bottom,
+    )
+    all_candidates, cut_existing_1 = _filter_existing_links(all_candidates, page_by_url, *existing_link_args)
+    cut_by_depth_candidates, cut_existing_2 = _filter_existing_links(cut_by_depth_candidates, page_by_url, *existing_link_args)
+    l1_outbound_candidates, cut_existing_3 = _filter_existing_links(l1_outbound_candidates, page_by_url, *existing_link_args)
+    cut_by_existing_link_candidates = sorted(
+        cut_existing_1 + cut_existing_2 + cut_existing_3, key=_candidate_sort_key
+    )
+
     return {
         "all_candidates": all_candidates,
         "cut_by_depth_candidates": cut_by_depth_candidates,
+        "cut_by_existing_link_candidates": cut_by_existing_link_candidates,
         "l1_outbound_candidates": l1_outbound_candidates,
         "max_level_diff": max_level_diff,
         "hierarchy_candidates": hierarchy_candidates,

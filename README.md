@@ -29,18 +29,21 @@ struktura (kategorie / filtry-fasety / strony marek + breadcrumb).
    "brand", nawet jesli sama nie jest wprost na tej liscie - typowy przypadek
    to podstrona marka+kategoria (np. `brand/dafi/dzbanki-filtrujace`), ktorej
    lista Marki nie wymienia osobno, bo wymienia tylko glowne strony marek.
-3. **Zaznaczasz wykluczenia** (3xx, 4xx, noindex), ustawiasz suwaki **"Maksymalna
-   roznica poziomow"** (domyslnie 1), **"Liczba propozycji z warstwy
-   embedding_podobienstwo"** (domyslnie **10** = max, `0` = wylacz - patrz
-   sekcja Reguly ponizej), opcjonalnie **"Sufiks do usuniecia z konca Anchor"**
-   (np. stala nazwa sklepu na koncu H1) i klikasz "Uruchom analize".
+3. **Zaznaczasz wykluczenia** (3xx, 4xx, noindex, soft-404 - patrz nizej),
+   opcjonalnie tez **linki juz istniejace na stronie** (menu glowne, menu
+   boczne, box kategorii/nawigacja fasetowa, opis kategorii na dole - patrz
+   nizej), ustawiasz suwaki **"Maksymalna roznica poziomow"** (domyslnie 1),
+   **"Liczba propozycji z warstwy embedding_podobienstwo"** (domyslnie **10**
+   = max, `0` = wylacz - patrz sekcja Reguly ponizej), opcjonalnie **"Sufiks
+   do usuniecia z konca Anchor"** (np. stala nazwa sklepu na koncu H1) i
+   klikasz "Uruchom analize".
 4. **Dostajesz dwa pliki:**
    - `chmura_linkow_do_oceny.xlsx` - kandydaci rozbici na **3 zeszyty wg
      Source_Type** (kto linkuje): `Kandydaci do link. (kategorie)`, `(marki)`,
      `(filtry)`, plus arkusze pomocnicze (`L1_do_uzupelnienia`,
      `L2_pod_L1_bez_siostr`, `Pominiete_zbyt_glebokie`,
-     `Marka_wykluczona_generyczna`, `Wszystkie_adresy_wejsciowe`, `Diagnostyka`)
-     do recznej weryfikacji
+     `Pominiete_juz_na_stronie`, `Marka_wykluczona_generyczna`,
+     `Wszystkie_adresy_wejsciowe`, `Diagnostyka`) do recznej weryfikacji
    - `chmura_linkow_matryca_contentful.xlsx` - gotowa macierz, **tak samo
      rozbita na 3 zeszyty wg Source_Type**: `Matryca Contentful (kategorie)`,
      `(marki)`, `(filtry)`. W kazdym: pierwsza kolumna `Source_URL`, kolejne
@@ -129,6 +132,27 @@ konczy sie stalym dopiskiem (np. nazwa sklepu/marki), mozna go obciac polem
 ustawic w Secrets (klucz `anchor_suffix_to_strip`) - dzieki temu nazwa
 sklepu/marki nie musi byc zaszyta na sztywno w kodzie w tym (publicznym)
 repozytorium.
+
+**Kolumna `Soft 404` (opcjonalna):** Custom Search w Screaming Frog (patrz
+zakladka "Konfiguracja Screaming Frog" w aplikacji) - liczba wystapien
+szukanego stringa (np. elementu graficznego strony bledu) na stronie. `0` =
+nie jest soft-404, `1` lub wiecej = jest. Checkbox "Nie uwzgledniaj soft-404"
+w sekcji 2 wyklucza takie strony z analizy (jako Source ORAZ jako Target) -
+domyslnie WLACZONY. Brak tej kolumny w pliku nie przeszkadza, checkbox po
+prostu nie ma wtedy nic do wykluczenia.
+
+**Kolumny `existing_links_menu_main` / `existing_links_menu_left` /
+`existing_links_category_box` / `existing_links_bottom` (opcjonalne):**
+Custom JavaScript w Screaming Frog (patrz zakladka "Konfiguracja Screaming
+Frog") - kazda to lista URL-i (jeden pod drugim w jednej komorce) juz
+podlinkowanych na stronie z danego miejsca (menu glowne, menu boczne, box
+kategorii/nawigacja fasetowa, opis kategorii na dole). Cztery odpowiadajace
+checkboxy w sekcji 2 wykluczaja z kandydatow propozycje, ktorych Target_URL
+jest juz podlinkowany na stronie zrodlowej z danego miejsca - taka propozycja
+jest zbedna. Odciete kandydaci trafiaja do arkusza `Pominiete_juz_na_stronie`
+(nic nie ginie bez sladu, jak przy limicie glebokosci). Brak ktorejkolwiek z
+tych kolumn nie przeszkadza - odpowiadajacy checkbox po prostu nie ma wtedy
+nic do wykluczenia.
 
 **Wazna wlasciwosc, na ktorej opiera sie reguła kategoria→filtr:** strona z
 parametrem/fasetem (np. `?brand=PHILIPS`) musi miec w crawlu **identyczny
