@@ -23,6 +23,16 @@ zapytan - patrz app.py, gdzie ta funkcja jest wywolywana w osobnym watku
 (threading.Thread), zeby przycisk "Przerwij" w UI mial szanse zadzialac
 (Streamlit nie przetwarza klikniec w trakcie jednego dlugiego, synchronicznego
 przebiegu skryptu).
+
+Cache w Supabase (opcjonalny, patrz supabase_cache.py): PRZED wyslaniem
+czegokolwiek do OpenAI, app.py sprawdza w Supabase, czy dana para
+Source_URL/Target_URL nie byla juz kiedys oceniona - jesli tak, bierze
+wynik STAMTAD zamiast pytac model ponownie (oszczednosc czasu/kosztu przy
+powtarzanych biegach na tych samych danych). Nowe oceny sa zapisywane do
+Supabase NA BIEZACO (patrz `on_batch_evaluated` nizej), nie dopiero po
+calosci - przerwanie w trakcie nie traci juz uzyskanych wynikow. ai_eval.py
+NIC nie wie o Supabase bezposrednio (tylko o callbacku `on_batch_evaluated`)
+- to app.py laczy oba moduly.
 """
 
 from __future__ import annotations
@@ -115,6 +125,7 @@ def evaluate_embedding_candidates(
     progress: Callable[[int, int], None] | None = None,
     stop_event: threading.Event | None = None,
     results_holder: dict[tuple, str] | None = None,
+    on_batch_evaluated: Callable[[list[dict]], None] | None = None,
 ) -> list[str]:
     """
     Mutuje kazdy dict w `candidates` IN PLACE: dopisuje `Ocena_AI` (TAK/NIE/MOŻE)
@@ -138,6 +149,12 @@ def evaluate_embedding_candidates(
     oceny, ale plik xlsx wychodzil z pusta kolumna Ocena_AI). app.py uzywa
     tego do jawnego "doklejenia" ocen po kluczu tuz przed budowa plikow,
     zamiast polegac WYLACZNIE na mutacji in-place.
+
+    `on_batch_evaluated(rows)`: opcjonalny callback wywolywany PO kazdej
+    ocenionej paczce (rows = wiersze z TEJ paczki, juz z ustawionym Ocena_AI) -
+    patrz app.py/supabase_cache.py, gdzie sluzy do zapisu wynikow do cache
+    Supabase NA BIEZACO (nie dopiero na koncu), zeby przerwanie w trakcie
+    (stop_event) nie tracilo juz opłaconych/wykonanych ocen.
 
     Zwraca liste komunikatow bledow (pusta lista = bez problemow). Blad
     pojedynczego zapytania NIE przerywa reszty - dotkniete wiersze zostaja
@@ -181,6 +198,8 @@ def evaluate_embedding_candidates(
                 c[AI_EVAL_COLUMN] = verdict
                 if results_holder is not None:
                     results_holder[(c.get("Source_URL"), c.get("Target_URL"))] = verdict
+            if on_batch_evaluated and rows_by_id:
+                on_batch_evaluated(list(rows_by_id.values()))
 
         done += len(chunk)
         if progress:

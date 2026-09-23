@@ -22,6 +22,7 @@ from linking_engine import build_pages, run_all_rules
 from io_utils import read_url_list_file, read_internal_html_file
 from export import build_review_workbook, build_contentful_matrix, SOURCE_TYPE_SHEET_NAMES
 import ai_eval
+import supabase_cache
 
 
 st.set_page_config(page_title="Chmura linkow - linkowanie wewnetrzne", page_icon="🔗", layout="wide")
@@ -67,6 +68,24 @@ def _configured_openai_model() -> str:
         return st.secrets.get("openai_model") or ai_eval.DEFAULT_MODEL
     except Exception:
         return ai_eval.DEFAULT_MODEL
+
+
+def _configured_supabase_url() -> str:
+    """Domyslny URL projektu Supabase - z Secrets (klucz `supabase_url`),
+    patrz README (sekcja Supabase) - opcjonalny cache ocen AI."""
+    try:
+        return st.secrets.get("supabase_url") or ""
+    except Exception:
+        return ""
+
+
+def _configured_supabase_key() -> str:
+    """Domyslny klucz API Supabase (service_role) - z Secrets (klucz
+    `supabase_key`), patrz README (sekcja Supabase)."""
+    try:
+        return st.secrets.get("supabase_key") or ""
+    except Exception:
+        return ""
 
 
 def _ai_thread_running() -> bool:
@@ -578,6 +597,36 @@ st.caption(
     "Przy duzej liczbie propozycji (wysoki suwak embedding_top_n powyzej) moze to zajac dluzsza chwile."
 )
 
+st.caption(
+    "**Cache w Supabase (opcjonalnie):** jesli podasz ponizej URL i klucz, przed wyslaniem "
+    "czegokolwiek do OpenAI narzedzie sprawdza, czy dana para Source_URL/Target_URL nie byla juz "
+    "kiedys oceniona - jesli tak, bierze wynik STAMTAD zamiast pytac model ponownie. Nowe oceny sa "
+    "zapisywane do tej samej tabeli na biezaco. Instrukcja zalozenia tabeli: README, sekcja Supabase. "
+    "Bez konfiguracji dziala dokladnie tak jak wczesniej (kazdy bieg ocenia wszystko od nowa)."
+)
+sb_col1, sb_col2 = st.columns(2)
+with sb_col1:
+    supabase_url = st.text_input(
+        "Supabase URL",
+        value=_configured_supabase_url(),
+        help=(
+            "Adres projektu Supabase, np. https://xxxx.supabase.co. Domyslna wartosc mozna ustawic "
+            "w Secrets (klucz `supabase_url`) - patrz README."
+        ),
+        disabled=not use_ai_eval,
+    )
+with sb_col2:
+    supabase_key = st.text_input(
+        "Supabase API key (service_role)",
+        value=_configured_supabase_key(),
+        type="password",
+        help=(
+            "Klucz service_role z ustawien projektu Supabase (Project Settings -> API). Domyslna "
+            "wartosc mozna ustawic w Secrets (klucz `supabase_key`) - patrz README."
+        ),
+        disabled=not use_ai_eval,
+    )
+
 def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors, ai_results=None):
     """
     Wspolny "finisz" po analizie - Podsumowanie + budowa 2 plikow xlsx +
@@ -603,8 +652,9 @@ def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_url
 
     if ai_errors:
         st.warning(
-            "Niektore zapytania do OpenAI nie powiodly sie - dotkniete wiersze zostaly "
-            "bez oceny (Ocena_AI puste), reszta analizy dziala normalnie:\n\n"
+            "Niektore zapytania do OpenAI i/lub zapisy do cache Supabase nie powiodly sie - "
+            "dotkniete wiersze zostaly bez oceny (Ocena_AI puste) albo po prostu nie trafily do "
+            "cache na przyszlosc, reszta analizy dziala normalnie:\n\n"
             + "\n".join(f"- {e}" for e in ai_errors[:10])
         )
 
@@ -796,45 +846,85 @@ if run_clicked and not _ai_thread_running():
         st.session_state.pop("ai_results_holder", None)
 
         ai_thread_started = False
+        cache_only_ai_results = None
         if use_ai_eval and openai_api_key:
-            embedding_rows_to_eval = [
+            embedding_rows_to_eval_all = [
                 c for c in all_candidates + result["l1_outbound_candidates"]
                 if c.get("Rule") == "embedding_podobienstwo"
             ]
-            if not embedding_rows_to_eval:
+            if not embedding_rows_to_eval_all:
                 pass  # brak propozycji embeddingowych - nic do oceny, przechodzimy prosto do budowy plikow
             else:
-                # Ocena AI idzie w OSOBNYM WATKU (nie synchronicznie tutaj) - to jedyny
-                # sposob, zeby przycisk "Przerwij" mial szanse zadzialac. W trakcie
-                # jednego dlugiego, blokujacego wywolania Streamlit nie przetwarza
-                # klikniec - dopiero po tym, jak skrypt sam sie odswiezy (st.rerun).
-                page_by_url = {p.url: p for p in pages}
-                stop_event = threading.Event()
-                progress_holder = {"done": 0, "total": len(embedding_rows_to_eval)}
-                errors_holder = []
-                results_holder: dict[tuple, str] = {}
-                model_to_use = openai_model.strip() or ai_eval.DEFAULT_MODEL
+                # Cache Supabase (opcjonalny): pary juz kiedys ocenione NIE ida
+                # ponownie do OpenAI - patrz supabase_cache.py.
+                pairs_to_check = [(c["Source_URL"], c["Target_URL"]) for c in embedding_rows_to_eval_all]
+                cached_verdicts, cache_error = supabase_cache.fetch_cached_verdicts(
+                    pairs_to_check, supabase_url, supabase_key
+                )
+                if cache_error:
+                    st.warning(cache_error)
 
-                def _ai_worker(
-                    rows=embedding_rows_to_eval, pbu=page_by_url, key=openai_api_key,
-                    model=model_to_use, ev=stop_event, ph=progress_holder, eh=errors_holder,
-                    rh=results_holder,
-                ):
-                    errs = ai_eval.evaluate_embedding_candidates(
-                        rows, pbu, api_key=key, model=model, stop_event=ev,
-                        progress=lambda d, t: ph.update(done=d, total=t),
-                        results_holder=rh,
+                results_holder: dict[tuple, str] = dict(cached_verdicts)
+                embedding_rows_to_eval = []
+                for c in embedding_rows_to_eval_all:
+                    key = (c["Source_URL"], c["Target_URL"])
+                    if key in cached_verdicts:
+                        c["Ocena_AI"] = cached_verdicts[key]
+                    else:
+                        embedding_rows_to_eval.append(c)
+
+                if cached_verdicts:
+                    st.info(
+                        f"{len(cached_verdicts)} z {len(embedding_rows_to_eval_all)} par embeddingowych "
+                        "mialo juz zapisana ocene w cache Supabase - pominieto dla nich ponowne "
+                        "zapytanie do OpenAI."
                     )
-                    eh.extend(errs)
 
-                thread = threading.Thread(target=_ai_worker, daemon=True)
-                st.session_state["ai_thread"] = thread
-                st.session_state["ai_stop_event"] = stop_event
-                st.session_state["ai_progress_holder"] = progress_holder
-                st.session_state["ai_errors_holder"] = errors_holder
-                st.session_state["ai_results_holder"] = results_holder
-                thread.start()
-                ai_thread_started = True
+                if not embedding_rows_to_eval:
+                    # Wszystko juz bylo w cache - nic do wyslania do OpenAI, ale
+                    # oceny z cache nadal trzeba doczepic do wynikow (patrz
+                    # ai_results w _show_summary_and_build_outputs).
+                    cache_only_ai_results = results_holder
+                else:
+                    # Ocena AI idzie w OSOBNYM WATKU (nie synchronicznie tutaj) - to jedyny
+                    # sposob, zeby przycisk "Przerwij" mial szanse zadzialac. W trakcie
+                    # jednego dlugiego, blokujacego wywolania Streamlit nie przetwarza
+                    # klikniec - dopiero po tym, jak skrypt sam sie odswiezy (st.rerun).
+                    page_by_url = {p.url: p for p in pages}
+                    stop_event = threading.Event()
+                    progress_holder = {"done": 0, "total": len(embedding_rows_to_eval)}
+                    errors_holder = []
+                    model_to_use = openai_model.strip() or ai_eval.DEFAULT_MODEL
+                    sb_url, sb_key = supabase_url, supabase_key
+
+                    def _write_to_supabase_cache(rows, url=sb_url, key=sb_key, model=model_to_use, eh=errors_holder):
+                        # Zapis NA BIEZACO po kazdej paczce - przerwanie w trakcie
+                        # (stop_event) nie traci juz uzyskanych ocen.
+                        err = supabase_cache.upsert_verdicts(rows, url, key, model)
+                        if err:
+                            eh.append(err)
+
+                    def _ai_worker(
+                        rows=embedding_rows_to_eval, pbu=page_by_url, key=openai_api_key,
+                        model=model_to_use, ev=stop_event, ph=progress_holder, eh=errors_holder,
+                        rh=results_holder,
+                    ):
+                        errs = ai_eval.evaluate_embedding_candidates(
+                            rows, pbu, api_key=key, model=model, stop_event=ev,
+                            progress=lambda d, t: ph.update(done=d, total=t),
+                            results_holder=rh,
+                            on_batch_evaluated=_write_to_supabase_cache,
+                        )
+                        eh.extend(errs)
+
+                    thread = threading.Thread(target=_ai_worker, daemon=True)
+                    st.session_state["ai_thread"] = thread
+                    st.session_state["ai_stop_event"] = stop_event
+                    st.session_state["ai_progress_holder"] = progress_holder
+                    st.session_state["ai_errors_holder"] = errors_holder
+                    st.session_state["ai_results_holder"] = results_holder
+                    thread.start()
+                    ai_thread_started = True
 
         if ai_thread_started:
             # Watek juz dziala w tle - zapisz co potrzebne po odswiezeniu (kazdy
@@ -847,9 +937,12 @@ if run_clicked and not _ai_thread_running():
             st.session_state["pending_all_input_urls"] = all_input_urls
             st.rerun()
         else:
-            # Ocena AI wylaczona/pominieta - buduj wyniki od razu, bez dodatkowego
-            # (niepotrzebnego w tym przypadku) przebiegu skryptu.
-            _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, [])
+            # Ocena AI wylaczona/pominieta (albo wszystko juz bylo w cache Supabase) -
+            # buduj wyniki od razu, bez dodatkowego (niepotrzebnego w tym przypadku)
+            # przebiegu skryptu.
+            _show_summary_and_build_outputs(
+                pages, result, all_candidates, all_input_urls, [], ai_results=cache_only_ai_results
+            )
 
 elif _ai_thread_running():
     # W trakcie oceny AI (odpalonej w gornej galezi, po czym skrypt sam sie

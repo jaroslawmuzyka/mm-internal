@@ -126,6 +126,54 @@ skryptu). Przerwanie konczy biezaca paczke i od razu buduje pliki wynikowe z
 tym, co juz zdazylo zostac ocenione - reszta wierszy zostaje po prostu bez
 `Ocena_AI`, tak jak przy bledzie zapytania.
 
+### Cache ocen AI w Supabase (opcjonalny)
+
+Te same pary Source_URL/Target_URL czesto przewijaja sie przez wiele biegow
+(nowy crawl, poprawka w danych wejsciowych) - bez cache kazdy taki bieg
+oceniałby je od nowa przez OpenAI (koszt + czas, zwlaszcza przy dziesiatkach
+tysiecy propozycji embeddingowych). Podajac URL i klucz projektu Supabase
+(pola w UI obok klucza OpenAI, albo Secrets - patrz nizej), narzedzie PRZED
+wyslaniem czegokolwiek do OpenAI sprawdza w tabeli `ai_link_evaluations`, czy
+dana para nie byla juz kiedys oceniona - jesli tak, bierze wynik STAMTAD.
+Tylko pary, ktorych NIE MA jeszcze w cache, ida do OpenAI - ich wynik jest
+zapisywany do tej samej tabeli NA BIEZACO (paczka po paczce, wiec przerwanie
+przyciskiem "Przerwij" nie traci juz uzyskanych ocen).
+
+**Jak skonfigurowac (jednorazowo):**
+1. Zaloz projekt na [supabase.com](https://supabase.com) (darmowy plan
+   wystarczy do tego zastosowania).
+2. W projekcie wejdz w **SQL Editor** i uruchom:
+   ```sql
+   create table ai_link_evaluations (
+       source_url text not null,
+       target_url text not null,
+       ocena text not null,
+       model text,
+       evaluated_at timestamptz not null default now(),
+       primary key (source_url, target_url)
+   );
+   ```
+3. W **Project Settings -> API** skopiuj **Project URL** (np.
+   `https://xxxx.supabase.co`) oraz klucz **service_role** (NIE `anon` -
+   `service_role` ma pelny dostep do zapisu, co jest wymagane do dzialania
+   cache; ten klucz nigdy nie trafia do przegladarki uzytkownika koncowego -
+   zyje wylacznie po stronie serwera Streamlit, tak samo jak klucz OpenAI).
+4. Wklej oba w pola **"Supabase URL"** / **"Supabase API key (service_role)"**
+   w UI (sekcja "Ocena AI trafnosci..."), albo ustaw w Secrets - patrz sekcja
+   "Haslo dostepu i inne Secrets" ponizej:
+   ```
+   supabase_url = "https://xxxx.supabase.co"
+   supabase_key = "..."
+   ```
+
+Bez tej konfiguracji wszystko dziala dokladnie tak jak wczesniej (kazdy bieg
+ocenia wszystkie propozycje embeddingowe od nowa) - cache jest czysto
+opcjonalnym przyspieszeniem, nie wymaganiem. Blad polaczenia z Supabase (zly
+klucz, brak sieci, tabela jeszcze nie istnieje) nigdy nie przerywa analizy -
+odczyt cache po prostu daje "brak w cache" (wszystko idzie do OpenAI jak bez
+cache), a blad zapisu pokazuje sie jako ostrzezenie w UI, reszta dziala dalej
+normalnie (patrz `supabase_cache.py`).
+
 **Sufiks w Anchor (opcjonalny):** jesli H1 (a wiec i Anchor w wynikach)
 konczy sie stalym dopiskiem (np. nazwa sklepu/marki), mozna go obciac polem
 "Sufiks do usuniecia z konca Anchor" w UI. Wartosc domyslna tego pola mozna
@@ -329,6 +377,8 @@ nie w kodzie:
   anchor_suffix_to_strip = " w MediaMarkt"
   openai_api_key = "sk-..."
   openai_model = "gpt-5.4-mini-2026-03-17"
+  supabase_url = "https://xxxx.supabase.co"
+  supabase_key = "..."
   ```
   Zapisz - aplikacja sama sie zrestartuje z nowymi wartosciami. Zmiana pozniej
   = ta sama sciezka, bez zadnego deployu.
@@ -367,9 +417,11 @@ linking_engine.py     - czysta logika regul (bez zaleznosci od Streamlit)
 io_utils.py           - wczytywanie xlsx/csv/sitemap -> znormalizowane dane
 export.py             - budowa dwoch plikow xlsx wyjsciowych
 ai_eval.py             - integracja z OpenAI: ocena TAK/NIE/MOŻE dla embedding_podobienstwo
+supabase_cache.py      - opcjonalny cache ocen AI w Supabase (odczyt/zapis przez REST API)
 requirements.txt
 .streamlit/config.toml
 ```
 
-`linking_engine.py`, `export.py` i `ai_eval.py` nie zaleza od Streamlit, wiec
-mozna je testowac/uzywac niezaleznie (np. w skrypcie CLI albo w notebooku).
+`linking_engine.py`, `export.py`, `ai_eval.py` i `supabase_cache.py` nie
+zaleza od Streamlit, wiec mozna je testowac/uzywac niezaleznie (np. w
+skrypcie CLI albo w notebooku).
