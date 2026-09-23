@@ -37,28 +37,36 @@ struktura (kategorie / filtry-fasety / strony marek + breadcrumb).
    = max, `0` = wylacz - patrz sekcja Reguly ponizej), opcjonalnie **"Sufiks
    do usuniecia z konca Anchor"** (np. stala nazwa sklepu na koncu H1) i
    klikasz "Uruchom analize".
-4. **Dostajesz dwa pliki:**
-   - `chmura_linkow_do_oceny.xlsx` - kandydaci rozbici na **3 zeszyty wg
+4. **Dostajesz dwa (albo cztery) pliki:**
+   - `chmura_linkow_pelne_wyniki.xlsx` - kandydaci rozbici na **3 zeszyty wg
      Source_Type** (kto linkuje): `Kandydaci do link. (kategorie)`, `(marki)`,
      `(filtry)`, plus arkusze pomocnicze (`L1_do_uzupelnienia`,
      `L2_pod_L1_bez_siostr`, `Pominiete_zbyt_glebokie`,
      `Pominiete_juz_na_stronie`, `Marka_wykluczona_generyczna`,
      `Wszystkie_adresy_wejsciowe`, `Diagnostyka`) do recznej weryfikacji
-   - `chmura_linkow_matryca_contentful.xlsx` - gotowa macierz, **tak samo
-     rozbita na 3 zeszyty wg Source_Type**: `Matryca Contentful (kategorie)`,
-     `(marki)`, `(filtry)`. W kazdym: pierwsza kolumna `Source_URL`, kolejne
-     `Link_1, Link_2, ...` z URL-ami do zalinkowania
+   - `chmura_linkow_pelne_wyniki_matryca_contentful.xlsx` - gotowa macierz,
+     **tak samo rozbita na 3 zeszyty wg Source_Type**: `Matryca Contentful
+     (kategorie)`, `(marki)`, `(filtry)`. W kazdym: pierwsza kolumna
+     `Source_URL`, kolejne `Link_1, Link_2, ...` z URL-ami do zalinkowania
+   - jesli warstwa embedding_podobienstwo ma juz jakas ocene AI (patrz nizej):
+     DODATKOWO ta sama para plikow **"przefiltrowana"** wg checkboxow
+     "Filtrowanie wynikow wg oceny AI" (sekcja 2) -
+     `chmura_linkow_przefiltrowane_wyniki.xlsx` i
+     `..._matryca_contentful.xlsx`. Odznaczenie np. NIE i MOŻE zostawia w
+     warstwie embedding_podobienstwo TYLKO propozycje z ocena TAK - wiersze
+     bez oceny (AI wylaczone/blad/przerwane) i wszystkie POZOSTALE reguly
+     (nigdy nie maja Ocena_AI) zawsze zostaja, filtr dotyczy WYLACZNIE
+     ocenionych wierszy embedding_podobienstwo.
 
-   W **obu plikach** komorka `Target_URL` / `Link_N` jest kolorowana wg
-   pewnosci dopasowania - patrz "Skala pewnosci" w sekcji Reguly ponizej.
+   We **wszystkich plikach** komorka `Target_URL` / `Link_N` jest kolorowana
+   wg pewnosci dopasowania - patrz "Skala pewnosci" w sekcji Reguly ponizej.
 
 **Pasek postepu:** liczenie regul (wliczajac cosine similarity dla warstwy
 embedding_podobienstwo) trwa milisekundy nawet dla kilku tysiecy stron - to
 NIE tam realnie czekasz. Wasko gardlo to zapis samych plikow xlsx: stylowanie
 komorka-po-komorce w openpyxl dla kilkunastu tysiecy wierszy potrafi zajac
-kilkadziesiat sekund, wiec pasek postepu (z etykieta arkusza i liczba
-zapisanych wierszy) pokazuje sie wlasnie na tym etapie - osobno dla pliku
-"do oceny" i osobno dla macierzy Contentful.
+kilkadziesiat sekund, wiec pasek postepu pokazuje sie wlasnie na tym etapie -
+osobno dla kazdego z (do czterech) plikow.
 
 Jest tez opcjonalny "Krok 2": jesli recznie poprawisz plik "do oceny"
 (usunites/dodasz wiersze w ktorejkolwiek z zakladek `Kandydaci do link.
@@ -125,6 +133,22 @@ przetwarza klikniec w trakcie jednego dlugiego, synchronicznego przebiegu
 skryptu). Przerwanie konczy biezaca paczke i od razu buduje pliki wynikowe z
 tym, co juz zdazylo zostac ocenione - reszta wierszy zostaje po prostu bez
 `Ocena_AI`, tak jak przy bledzie zapytania.
+
+**Podglad i edycja promptow:** rozwijany panel "Podglad i edycja promptow
+oceny AI" (obok pol OpenAI) pokazuje dokladny system prompt i user prompt,
+ktore ida do modelu - mozna je swobodnie edytowac (np. dopisac wyjatek albo
+dodatkowy kontekst, gdy w trakcie pracy z narzedziem okaze sie, ze warto).
+Zmiany zyja tylko w danej sesji przegladarki (nie sa zapisywane trwale) -
+przycisk "Przywroc oba prompty do domyslnych" cofa do wersji z kodu. Nawet
+calkowicie popsuty prompt (np. usuniecie instrukcji formatu JSON) nie wywala
+analizy - najwyzej dana paczka konczy sie bledem i pustymi ocenami.
+
+**Filtrowanie wynikow wg oceny AI:** trzy checkboxy w sekcji 2 ("Uwzglednij
+TAK/MOŻE/NIE") kontroluja, ktore propozycje z warstwy embedding_podobienstwo
+trafiaja do DODATKOWEJ pary plikow "przefiltrowanych" (patrz "Jak to dziala"
+powyzej) - obok zawsze budowanej pary "pelnych" plikow z KOMPLETEM propozycji.
+Wiersze bez oceny (i wszystkie inne reguly) nigdy nie sa przez ten filtr
+wycinane.
 
 ### Cache ocen AI w Supabase (opcjonalny)
 

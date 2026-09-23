@@ -627,11 +627,90 @@ with sb_col2:
         disabled=not use_ai_eval,
     )
 
-def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors, ai_results=None):
+with st.expander("Podglad i edycja promptow oceny AI (opcjonalnie)"):
+    st.caption(
+        "Dokladnie te teksty ida do OpenAI przy kazdej paczce ocenianych par. Edycja jest "
+        "bezpieczna - nawet calkowicie zle sformatowany prompt nie wywali analizy, najwyzej "
+        "ta konkretna paczka skonczy sie bledem zapytania i pustymi ocenami (patrz ostrzezenie "
+        "w Podsumowaniu). Zmiany obowiazuja tylko w tej sesji przegladarki, nie sa nigdzie "
+        "trwale zapisywane."
+    )
+    if st.button("Przywroc oba prompty do domyslnych"):
+        st.session_state["ai_system_prompt"] = ai_eval.SYSTEM_PROMPT
+        st.session_state["ai_user_prompt_prefix"] = ai_eval.USER_PROMPT_PREFIX
+    ai_system_prompt = st.text_area(
+        "System prompt",
+        value=st.session_state.get("ai_system_prompt", ai_eval.SYSTEM_PROMPT),
+        key="ai_system_prompt",
+        height=200,
+        disabled=not use_ai_eval,
+    )
+    ai_user_prompt_prefix = st.text_area(
+        "User prompt (prefiks przed lista par w formacie JSON)",
+        value=st.session_state.get("ai_user_prompt_prefix", ai_eval.USER_PROMPT_PREFIX),
+        key="ai_user_prompt_prefix",
+        height=150,
+        help=(
+            "Musi zawierac instrukcje, zeby model zwrocil JSON w formacie "
+            '{"results": [{"id": <int>, "ocena": "TAK"|"NIE"|"MOZE"}, ...]} - bez tego parsowanie '
+            "odpowiedzi nie zadziala (ale, jak wyzej, nie wywali calej analizy)."
+        ),
+        disabled=not use_ai_eval,
+    )
+
+st.subheader("Filtrowanie wynikow wg oceny AI (opcjonalnie)")
+st.caption(
+    "Dotyczy TYLKO propozycji z warstwy embedding_podobienstwo (jedynej ocenianej przez AI). "
+    "Odznacz werdykt, ktorego NIE chcesz w plikach 'przefiltrowanych' (patrz sekcja 4 - obok "
+    "pelnych plikow pojawia sie wtedy druga para: przefiltrowane wyniki + przefiltrowana "
+    "macierz Contentful). Wiersze embedding_podobienstwo bez oceny (AI wylaczone/blad/przerwane) "
+    "NIE sa przez ten filtr wycinane - trafiaja do przefiltrowanego pliku tak jak do pelnego, "
+    "zeby nieocenione dane nie znikaly po cichu. Pelne pliki (bez filtra) powstaja zawsze, "
+    "niezaleznie od tych checkboxow."
+)
+verdict_col1, verdict_col2, verdict_col3 = st.columns(3)
+with verdict_col1:
+    include_verdict_tak = st.checkbox("Uwzglednij TAK", value=True)
+with verdict_col2:
+    include_verdict_moze = st.checkbox("Uwzglednij MOŻE", value=True)
+with verdict_col3:
+    include_verdict_nie = st.checkbox("Uwzglednij NIE", value=True)
+
+def _filter_by_ai_verdict(candidates, include_tak, include_moze, include_nie):
     """
-    Wspolny "finisz" po analizie - Podsumowanie + budowa 2 plikow xlsx +
-    zapis do session_state (skad je pobiera sekcja '4. Pobierz pliki').
-    Wywolywane w dwoch miejscach: od razu po run_all_rules (gdy ocena AI jest
+    Zwraca `candidates` po odfiltrowaniu propozycji embedding_podobienstwo wg
+    ich Ocena_AI - patrz checkboxy "Filtrowanie wynikow wg oceny AI" powyzej.
+    Wiersze innych regul (nigdy nie maja Ocena_AI - nie sa oceniane przez AI)
+    oraz wiersze embedding_podobienstwo BEZ oceny (puste Ocena_AI - AI
+    wylaczone/blad zapytania/przerwane w trakcie) zawsze zostaja - filtr
+    dotyczy WYLACZNIE wierszy embedding_podobienstwo, ktore faktycznie MAJA
+    jakas ocene.
+    """
+    allowed = set()
+    if include_tak:
+        allowed.add("TAK")
+    if include_moze:
+        allowed.add("MOŻE")
+    if include_nie:
+        allowed.add("NIE")
+    out = []
+    for c in candidates:
+        if c.get("Rule") == "embedding_podobienstwo":
+            verdict = c.get("Ocena_AI")
+            if verdict and verdict not in allowed:
+                continue
+        out.append(c)
+    return out
+
+
+def _show_summary_and_build_outputs(
+    pages, result, all_candidates, all_input_urls, ai_errors, ai_results=None,
+    include_verdict_tak=True, include_verdict_moze=True, include_verdict_nie=True,
+):
+    """
+    Wspolny "finisz" po analizie - Podsumowanie + budowa plikow xlsx + zapis
+    do session_state (skad je pobiera sekcja '4. Pobierz pliki'). Wywolywane
+    w dwoch miejscach: od razu po run_all_rules (gdy ocena AI jest
     wylaczona/pominieta) albo dopiero po zakonczeniu watku oceny AI w tle
     (patrz sekcja 3. Analiza nizej).
 
@@ -643,6 +722,12 @@ def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_url
     mialo poprawne oceny, ale plik xlsx wychodzil z pusta kolumna Ocena_AI
     (mutacja in-place najwyrazniej nie zawsze przezywa watek + kolejne
     st.rerun/session_state na tej platformie).
+
+    `include_verdict_tak` / `_moze` / `_nie`: patrz _filter_by_ai_verdict -
+    steruja budowa DODATKOWEJ pary plikow "przefiltrowane" (obok zawsze
+    budowanej pary "pelne"), pomijanej gdy zaden wiersz nie ma jeszcze
+    zadnej oceny AI (przefiltrowane bylyby wtedy bajt-w-bajt identyczne z
+    pelnymi - szkoda czasu na powtorny zapis xlsx).
     """
     if ai_results:
         for c in all_candidates + result["l1_outbound_candidates"]:
@@ -715,16 +800,23 @@ def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_url
     st.subheader("Podglad kandydatow (pierwsze 200 wierszy)")
     st.dataframe(pd.DataFrame(all_candidates).head(200), width="stretch")
 
+    # Czy w ogole jest co filtrowac wg oceny AI - jesli zaden wiersz jeszcze
+    # nie ma oceny, przefiltrowane pliki bylyby bajt-w-bajt identyczne z
+    # pelnymi, wiec pomijamy ich budowe (oszczednosc czasu zapisu xlsx).
+    build_filtered_files = any(c.get("Ocena_AI") for c in embedding_rows_all)
+
     # Liczenie regul (i warstwy embedding_podobienstwo) trwa milisekundy nawet
     # dla tysiecy stron - realny czas czekania to zapis xlsx: stylowanie
     # komorka-po-komorce w openpyxl dla kilkunastu tysiecy wierszy potrafi
     # zajac dziesiatki sekund, stad pasek postepu wlasnie tutaj.
-    progress_bar = st.progress(0, text="Zapisywanie pliku 'do oceny'...")
+    n_files = 4 if build_filtered_files else 2
+    progress_bar = st.progress(0, text="Zapisywanie pliku 'pelne wyniki'...")
 
-    def _make_progress_cb(prefix):
+    def _make_progress_cb(prefix, file_idx):
         def _cb(stage, done, total):
             frac = min(max(done / total, 0.0), 1.0) if total else 1.0
-            progress_bar.progress(frac, text=f"{prefix}: {stage} - {done}/{total} wierszy ({frac * 100:.0f}%)")
+            overall = (file_idx + frac) / n_files
+            progress_bar.progress(overall, text=f"{prefix}: {stage} - {done}/{total} wierszy ({frac * 100:.0f}%)")
         return _cb
 
     review_bytes = build_review_workbook(
@@ -741,19 +833,54 @@ def _show_summary_and_build_outputs(pages, result, all_candidates, all_input_url
         embedding_top_n=result["embedding_top_n"],
         embedding_skipped=result["embedding_skipped"],
         all_input_urls=all_input_urls,
-        progress=_make_progress_cb("Plik 'do oceny'"),
+        progress=_make_progress_cb("Pelne wyniki", 0),
     )
 
-    progress_bar.progress(0, text="Zapisywanie macierzy Contentful...")
     contentful_bytes = build_contentful_matrix(
         all_candidates,
-        progress=_make_progress_cb("Macierz Contentful"),
+        progress=_make_progress_cb("Pelna macierz Contentful", 1),
     )
-    progress_bar.progress(1.0, text="Gotowe!")
 
     st.session_state["review_bytes"] = review_bytes
     st.session_state["contentful_bytes"] = contentful_bytes
     st.session_state["all_candidates"] = all_candidates
+    st.session_state.pop("filtered_review_bytes", None)
+    st.session_state.pop("filtered_contentful_bytes", None)
+
+    if build_filtered_files:
+        filtered_all_candidates = _filter_by_ai_verdict(
+            all_candidates, include_verdict_tak, include_verdict_moze, include_verdict_nie
+        )
+        filtered_l1_outbound = _filter_by_ai_verdict(
+            result["l1_outbound_candidates"], include_verdict_tak, include_verdict_moze, include_verdict_nie
+        )
+
+        filtered_review_bytes = build_review_workbook(
+            filtered_all_candidates,
+            result["l1_categories"],
+            result["l2_under_l1_no_siblings"],
+            result["no_base_found"],
+            pages,
+            cut_by_depth_candidates=result["cut_by_depth_candidates"],
+            max_level_diff=result["max_level_diff"],
+            brand_generic_excluded=result["brand_generic_excluded"],
+            l1_outbound_candidates=filtered_l1_outbound,
+            cut_by_existing_link_candidates=result["cut_by_existing_link_candidates"],
+            embedding_top_n=result["embedding_top_n"],
+            embedding_skipped=result["embedding_skipped"],
+            all_input_urls=all_input_urls,
+            progress=_make_progress_cb("Przefiltrowane wyniki", 2),
+        )
+
+        filtered_contentful_bytes = build_contentful_matrix(
+            filtered_all_candidates,
+            progress=_make_progress_cb("Przefiltrowana macierz Contentful", 3),
+        )
+
+        st.session_state["filtered_review_bytes"] = filtered_review_bytes
+        st.session_state["filtered_contentful_bytes"] = filtered_contentful_bytes
+
+    progress_bar.progress(1.0, text="Gotowe!")
 
 
 st.header("3. Analiza")
@@ -907,13 +1034,15 @@ if run_clicked and not _ai_thread_running():
                     def _ai_worker(
                         rows=embedding_rows_to_eval, pbu=page_by_url, key=openai_api_key,
                         model=model_to_use, ev=stop_event, ph=progress_holder, eh=errors_holder,
-                        rh=results_holder,
+                        rh=results_holder, sp=ai_system_prompt, up=ai_user_prompt_prefix,
                     ):
                         errs = ai_eval.evaluate_embedding_candidates(
                             rows, pbu, api_key=key, model=model, stop_event=ev,
                             progress=lambda d, t: ph.update(done=d, total=t),
                             results_holder=rh,
                             on_batch_evaluated=_write_to_supabase_cache,
+                            system_prompt=sp,
+                            user_prompt_prefix=up,
                         )
                         eh.extend(errs)
 
@@ -941,7 +1070,9 @@ if run_clicked and not _ai_thread_running():
             # buduj wyniki od razu, bez dodatkowego (niepotrzebnego w tym przypadku)
             # przebiegu skryptu.
             _show_summary_and_build_outputs(
-                pages, result, all_candidates, all_input_urls, [], ai_results=cache_only_ai_results
+                pages, result, all_candidates, all_input_urls, [], ai_results=cache_only_ai_results,
+                include_verdict_tak=include_verdict_tak, include_verdict_moze=include_verdict_moze,
+                include_verdict_nie=include_verdict_nie,
             )
 
 elif _ai_thread_running():
@@ -980,25 +1111,51 @@ elif st.session_state.get("pending_result") is not None:
     all_candidates = st.session_state.pop("pending_all_candidates")
     all_input_urls = st.session_state.pop("pending_all_input_urls")
 
-    _show_summary_and_build_outputs(pages, result, all_candidates, all_input_urls, ai_errors, ai_results)
+    _show_summary_and_build_outputs(
+        pages, result, all_candidates, all_input_urls, ai_errors, ai_results,
+        include_verdict_tak=include_verdict_tak, include_verdict_moze=include_verdict_moze,
+        include_verdict_nie=include_verdict_nie,
+    )
 
 if "review_bytes" in st.session_state:
     st.header("4. Pobierz pliki")
     d1, d2 = st.columns(2)
     with d1:
         st.download_button(
-            "⬇️ Pobierz XLSX do oceny",
+            "⬇️ Pelne wyniki (XLSX do oceny)",
             data=st.session_state["review_bytes"],
-            file_name="chmura_linkow_do_oceny.xlsx",
+            file_name="chmura_linkow_pelne_wyniki.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     with d2:
         st.download_button(
-            "⬇️ Pobierz macierz do Contentful",
+            "⬇️ Pelne wyniki - macierz Contentful",
             data=st.session_state["contentful_bytes"],
-            file_name="chmura_linkow_matryca_contentful.xlsx",
+            file_name="chmura_linkow_pelne_wyniki_matryca_contentful.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+    if "filtered_review_bytes" in st.session_state:
+        st.caption(
+            "Ponizsze dwa pliki maja z warstwy embedding_podobienstwo TYLKO propozycje "
+            "zgodne z zaznaczonymi werdyktami w sekcji 'Filtrowanie wynikow wg oceny AI' "
+            "powyzej (wiersze bez oceny AI zawsze zostaja - patrz opis tamtej sekcji)."
+        )
+        d3, d4 = st.columns(2)
+        with d3:
+            st.download_button(
+                "⬇️ Przefiltrowane wyniki (wg oceny AI)",
+                data=st.session_state["filtered_review_bytes"],
+                file_name="chmura_linkow_przefiltrowane_wyniki.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        with d4:
+            st.download_button(
+                "⬇️ Przefiltrowane wyniki - macierz Contentful",
+                data=st.session_state["filtered_contentful_bytes"],
+                file_name="chmura_linkow_przefiltrowane_wyniki_matryca_contentful.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 st.divider()
 with st.expander("Krok 2 (opcjonalnie): macierz Contentful z RECZNIE POPRAWIONEGO pliku"):

@@ -95,12 +95,14 @@ def _normalize_verdict(raw) -> str:
     return DISPLAY_VERDICT.get(v, "") if v in VALID_VERDICTS else ""
 
 
-def _call_batch(client, model: str, payload: list[dict]) -> dict[int, str]:
-    user_content = USER_PROMPT_PREFIX + json.dumps(payload, ensure_ascii=False)
+def _call_batch(
+    client, model: str, payload: list[dict], system_prompt: str, user_prompt_prefix: str
+) -> dict[int, str]:
+    user_content = user_prompt_prefix + json.dumps(payload, ensure_ascii=False)
     resp = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
         response_format={"type": "json_object"},
@@ -126,6 +128,8 @@ def evaluate_embedding_candidates(
     stop_event: threading.Event | None = None,
     results_holder: dict[tuple, str] | None = None,
     on_batch_evaluated: Callable[[list[dict]], None] | None = None,
+    system_prompt: str = SYSTEM_PROMPT,
+    user_prompt_prefix: str = USER_PROMPT_PREFIX,
 ) -> list[str]:
     """
     Mutuje kazdy dict w `candidates` IN PLACE: dopisuje `Ocena_AI` (TAK/NIE/MOŻE)
@@ -155,6 +159,16 @@ def evaluate_embedding_candidates(
     patrz app.py/supabase_cache.py, gdzie sluzy do zapisu wynikow do cache
     Supabase NA BIEZACO (nie dopiero na koncu), zeby przerwanie w trakcie
     (stop_event) nie tracilo juz opłaconych/wykonanych ocen.
+
+    `system_prompt` / `user_prompt_prefix`: domyslnie stale SYSTEM_PROMPT /
+    USER_PROMPT_PREFIX z tego modulu, ale app.py pozwala je podejrzec i
+    recznie edytowac w UI (pole tekstowe) - przydatne, gdy w trakcie pracy z
+    narzedziem okaze sie, ze trzeba dopisac jakis wyjatek/szczegol do
+    instrukcji dla modelu. Usuniecie instrukcji formatu JSON z
+    `user_prompt_prefix` NIE powoduje crasha - `_call_batch` przestanie sie
+    dac poprawnie sparsowac, co skonczy sie po prostu bledem zapytania dla tej
+    paczki (jak przy kazdym innym bledzie API) i pustymi ocenami, nie awaria
+    calej analizy.
 
     Zwraca liste komunikatow bledow (pusta lista = bez problemow). Blad
     pojedynczego zapytania NIE przerywa reszty - dotkniete wiersze zostaja
@@ -189,7 +203,7 @@ def evaluate_embedding_candidates(
 
         if payload:
             try:
-                verdicts = _call_batch(client, model, payload)
+                verdicts = _call_batch(client, model, payload, system_prompt, user_prompt_prefix)
             except Exception as e:
                 errors.append(f"Blad zapytania do OpenAI (wiersze {i + 1}-{i + len(chunk)}): {e}")
                 verdicts = {}
