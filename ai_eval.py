@@ -33,6 +33,15 @@ Supabase NA BIEZACO (patrz `on_batch_evaluated` nizej), nie dopiero po
 calosci - przerwanie w trakcie nie traci juz uzyskanych wynikow. ai_eval.py
 NIC nie wie o Supabase bezposrednio (tylko o callbacku `on_batch_evaluated`)
 - to app.py laczy oba moduly.
+
+Symetria A<->B (patrz `canonical_pair`): ocena tematycznej spojnosci nie
+zalezy od kierunku - "czy A pasuje do B" i "czy B pasuje do A" to to samo
+pytanie, wiec gdyby oba kierunki trafily do `candidates` (embedding_podobienstwo
+per-strona moze wygenerowac obie strony pary niezaleznie), NIE sa oceniane
+dwoma osobnymi zapytaniami do OpenAI - jedno zapytanie/jedna ocena obsluguje
+OBA wiersze naraz. To samo dotyczy cache Supabase (supabase_cache.py zapisuje
+i odczytuje pod kanonicznym kluczem), wiec przyszly bieg z para w odwrotnej
+kolejnosci tez trafia w cache.
 """
 
 from __future__ import annotations
@@ -72,6 +81,19 @@ USER_PROMPT_PREFIX = (
     "Jeden wpis w results na kazda pare z listy ponizej, w dowolnej kolejnosci, "
     "ale kazde \"id\" musi wystapic dokladnie raz.\n\n"
 )
+
+
+def canonical_pair(source_url: str, target_url: str) -> tuple[str, str]:
+    """
+    Kanoniczna, nieskierowana reprezentacja pary URL-i. Trafnosc tematyczna
+    (embedding_podobienstwo) nie zalezy od kierunku linku - "A pasuje do B"
+    i "B pasuje do A" to to samo pytanie - wiec zarowno deduplikacja w obrebie
+    jednego biegu (nizej), jak i cache Supabase (supabase_cache.py) uzywaja
+    tego klucza zamiast (Source_URL, Target_URL) wprost. Sortowanie
+    leksykograficzne - byle deterministyczne i zawsze takie samo dla danej
+    nieuporzadkowanej pary.
+    """
+    return (source_url, target_url) if source_url <= target_url else (target_url, source_url)
 
 
 def _build_client(api_key: str):
@@ -170,6 +192,12 @@ def evaluate_embedding_candidates(
     paczki (jak przy kazdym innym bledzie API) i pustymi ocenami, nie awaria
     calej analizy.
 
+    Deduplikacja A<->B (patrz canonical_pair): jesli wsrod `candidates` sa OBA
+    kierunki tej samej pary (A->B i B->A), oceniane sa JEDNYM zapytaniem, nie
+    dwoma - wynik trafia do obu wierszy. `progress`/`done`/`total` licza wiec
+    UNIKALNE (nieskierowane) pary, nie surowa liczbe wierszy - to realna
+    liczba pytan do OpenAI, ktora bedzie zadana.
+
     Zwraca liste komunikatow bledow (pusta lista = bez problemow). Blad
     pojedynczego zapytania NIE przerywa reszty - dotkniete wiersze zostaja
     po prostu bez oceny (Ocena_AI = "").
@@ -178,6 +206,15 @@ def evaluate_embedding_candidates(
     if not targets or not api_key:
         return []
 
+    # Grupuj po kanonicznej parze - patrz canonical_pair - zeby A->B i B->A
+    # (jesli oba sa wsrod kandydatow) dostaly JEDNA wspolna ocene zamiast
+    # dwoch osobnych zapytan do OpenAI.
+    groups: dict[tuple, list[dict]] = {}
+    for c in targets:
+        key = canonical_pair(c.get("Source_URL"), c.get("Target_URL"))
+        groups.setdefault(key, []).append(c)
+    unique_pairs = list(groups.values())
+
     try:
         client = _build_client(api_key)
     except Exception as e:
@@ -185,35 +222,39 @@ def evaluate_embedding_candidates(
 
     errors: list[str] = []
     done = 0
-    total = len(targets)
+    total = len(unique_pairs)
 
     for i in range(0, total, batch_size):
         if stop_event is not None and stop_event.is_set():
             break
-        chunk = targets[i:i + batch_size]
+        chunk = unique_pairs[i:i + batch_size]
         payload = []
-        rows_by_id = {}
-        for j, c in enumerate(chunk):
-            source = page_by_url.get(c.get("Source_URL"))
-            target = page_by_url.get(c.get("Target_URL"))
+        rows_by_id: dict[int, list[dict]] = {}
+        for j, rows in enumerate(chunk):
+            representative = rows[0]
+            source = page_by_url.get(representative.get("Source_URL"))
+            target = page_by_url.get(representative.get("Target_URL"))
             if source is None or target is None:
                 continue
             payload.append(_pair_payload(j, source, target))
-            rows_by_id[j] = c
+            rows_by_id[j] = rows
 
         if payload:
             try:
                 verdicts = _call_batch(client, model, payload, system_prompt, user_prompt_prefix)
             except Exception as e:
-                errors.append(f"Blad zapytania do OpenAI (wiersze {i + 1}-{i + len(chunk)}): {e}")
+                errors.append(f"Blad zapytania do OpenAI (unikalne pary {i + 1}-{i + len(chunk)}): {e}")
                 verdicts = {}
-            for j, c in rows_by_id.items():
+            evaluated_rows: list[dict] = []
+            for j, rows in rows_by_id.items():
                 verdict = verdicts.get(j, "")
-                c[AI_EVAL_COLUMN] = verdict
-                if results_holder is not None:
-                    results_holder[(c.get("Source_URL"), c.get("Target_URL"))] = verdict
-            if on_batch_evaluated and rows_by_id:
-                on_batch_evaluated(list(rows_by_id.values()))
+                for c in rows:
+                    c[AI_EVAL_COLUMN] = verdict
+                    if results_holder is not None:
+                        results_holder[(c.get("Source_URL"), c.get("Target_URL"))] = verdict
+                    evaluated_rows.append(c)
+            if on_batch_evaluated and evaluated_rows:
+                on_batch_evaluated(evaluated_rows)
 
         done += len(chunk)
         if progress:

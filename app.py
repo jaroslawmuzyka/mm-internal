@@ -983,7 +983,13 @@ if run_clicked and not _ai_thread_running():
                 pass  # brak propozycji embeddingowych - nic do oceny, przechodzimy prosto do budowy plikow
             else:
                 # Cache Supabase (opcjonalny): pary juz kiedys ocenione NIE ida
-                # ponownie do OpenAI - patrz supabase_cache.py.
+                # ponownie do OpenAI - patrz supabase_cache.py. Cache jest
+                # kluczowany KANONICZNIE (ai_eval.canonical_pair - ocena A<->B
+                # jest symetryczna), wiec kazdy wiersz sprawdzamy pod kluczem
+                # kanonicznym, ale results_holder (uzywany pozniej do
+                # "doklejenia" ocen po kluczu - patrz ai_results w
+                # _show_summary_and_build_outputs) trzyma LITERALNY klucz
+                # danego wiersza, nie kanoniczny.
                 pairs_to_check = [(c["Source_URL"], c["Target_URL"]) for c in embedding_rows_to_eval_all]
                 cached_verdicts, cache_error = supabase_cache.fetch_cached_verdicts(
                     pairs_to_check, supabase_url, supabase_key
@@ -991,19 +997,25 @@ if run_clicked and not _ai_thread_running():
                 if cache_error:
                     st.warning(cache_error)
 
-                results_holder: dict[tuple, str] = dict(cached_verdicts)
+                results_holder: dict[tuple, str] = {}
                 embedding_rows_to_eval = []
+                cache_hit_count = 0
                 for c in embedding_rows_to_eval_all:
-                    key = (c["Source_URL"], c["Target_URL"])
-                    if key in cached_verdicts:
-                        c["Ocena_AI"] = cached_verdicts[key]
+                    literal_key = (c["Source_URL"], c["Target_URL"])
+                    canonical_key = ai_eval.canonical_pair(*literal_key)
+                    if canonical_key in cached_verdicts:
+                        verdict = cached_verdicts[canonical_key]
+                        c["Ocena_AI"] = verdict
+                        results_holder[literal_key] = verdict
+                        cache_hit_count += 1
                     else:
                         embedding_rows_to_eval.append(c)
 
-                if cached_verdicts:
+                if cache_hit_count:
                     st.info(
-                        f"{len(cached_verdicts)} z {len(embedding_rows_to_eval_all)} par embeddingowych "
-                        "mialo juz zapisana ocene w cache Supabase - pominieto dla nich ponowne "
+                        f"{cache_hit_count} z {len(embedding_rows_to_eval_all)} par embeddingowych "
+                        "mialo juz zapisana ocene w cache Supabase (uwzgledniajac pary w odwrotnej "
+                        "kolejnosci - ocena A<->B jest symetryczna) - pominieto dla nich ponowne "
                         "zapytanie do OpenAI."
                     )
 

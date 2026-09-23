@@ -21,11 +21,22 @@ NIGDY nie rzuca wyjatku na zewnatrz - brak konfiguracji, zly klucz/URL, brak
 sieci, blad Supabase: odczyt daje po prostu pusty cache (wszystko idzie do
 OpenAI, jak bez cache), zapis daje komunikat bledu (do pokazania w UI jako
 ostrzezenie) - reszta analizy w OBU przypadkach dziala dalej normalnie.
+
+Symetria A<->B: ocena tematycznej spojnosci nie zalezy od kierunku, wiec
+zarowno odczyt jak i zapis uzywaja `ai_eval.canonical_pair` (para posortowana
+leksykograficznie) zamiast (Source_URL, Target_URL) wprost - dzieki temu
+ocena zapisana dla A->B jest znajdowana tez przy pytaniu o B->A w kolejnym
+biegu, zamiast oceniac ja ponownie. Wiersze zapisane PRZED wprowadzeniem tej
+zmiany (jesli para wtedy trafila do bazy w "nieskanonizowanej" kolejnosci)
+nie beda dopasowane przy pierwszym kolejnym biegu - to jednorazowy koszt,
+ocena po prostu zostanie zrobiona (i zapisana kanonicznie) jeszcze raz.
 """
 
 from __future__ import annotations
 
 import requests
+
+from ai_eval import canonical_pair
 
 TABLE_NAME = "ai_link_evaluations"
 FETCH_BATCH_SIZE = 40   # ile unikalnych Source_URL na 1 zapytanie GET (limit dlugosci URL-a zapytania)
@@ -54,22 +65,25 @@ def fetch_cached_verdicts(
     supabase_key: str,
 ) -> tuple[dict[tuple[str, str], str], str | None]:
     """
-    Zwraca (cache, error). `cache`: dict {(Source_URL, Target_URL): Ocena_AI}
-    dla par, ktore juz kiedys zostaly ocenione. `error`: komunikat bledu (None
-    = bez problemow). Pusta lista `pairs` albo brak konfiguracji (pusty
-    supabase_url/supabase_key) -> pusty cache, brak bledu (to normalny,
-    oczekiwany stan gdy Supabase nie jest skonfigurowany).
+    Zwraca (cache, error). `cache`: dict {canonical_pair(Source_URL, Target_URL):
+    Ocena_AI} dla par, ktore juz kiedys zostaly ocenione - klucz jest
+    KANONICZNY (patrz ai_eval.canonical_pair), wiec wywolujacy MUSI tez
+    kanonizowac przed sprawdzeniem `key in cache` (patrz app.py). `error`:
+    komunikat bledu (None = bez problemow). Pusta lista `pairs` albo brak
+    konfiguracji (pusty supabase_url/supabase_key) -> pusty cache, brak bledu
+    (to normalny, oczekiwany stan gdy Supabase nie jest skonfigurowany).
 
-    Pyta batchami po unikalnym Source_URL (nie po parach - PostgREST nie ma
-    wygodnej skladni na "lista dokladnych par", a liczba unikalnych Source_URL
-    jest zwykle duzo mniejsza niz liczba par dzieki embedding_top_n), po czym
-    filtruje wynik do dokladnie tych par, o ktore pytalismy.
+    Pyta batchami po unikalnym (kanonicznym) source_url (nie po parach -
+    PostgREST nie ma wygodnej skladni na "lista dokladnych par", a liczba
+    unikalnych source_url jest zwykle duzo mniejsza niz liczba par dzieki
+    embedding_top_n), po czym filtruje wynik do dokladnie tych par, o ktore
+    pytalismy.
     """
     if not pairs or not supabase_url or not supabase_key:
         return {}, None
 
-    source_urls = sorted({s for s, _ in pairs})
-    pair_set = set(pairs)
+    canonical_pairs = {canonical_pair(s, t) for s, t in pairs}
+    source_urls = sorted({p[0] for p in canonical_pairs})
     cache: dict[tuple[str, str], str] = {}
 
     try:
@@ -87,7 +101,7 @@ def fetch_cached_verdicts(
             resp.raise_for_status()
             for row in resp.json():
                 key = (row.get("source_url"), row.get("target_url"))
-                if key in pair_set and row.get("ocena"):
+                if key in canonical_pairs and row.get("ocena"):
                     cache[key] = row["ocena"]
         return cache, None
     except Exception as e:
@@ -102,7 +116,12 @@ def upsert_verdicts(
 ) -> str | None:
     """
     Zapisuje (upsert po kluczu source_url+target_url) nowo ocenione pary do
-    Supabase. `rows`: wiersze kandydatow (dicty z kluczami Source_URL,
+    Supabase - kazdy wiersz zapisywany jest pod KANONICZNYM kluczem (patrz
+    ai_eval.canonical_pair), niezaleznie od tego, w ktorym kierunku byl
+    faktycznie kandydatem (Source_URL/Target_URL moga wiec wyladowac w bazie
+    zamienione wzgledem oryginalnego wiersza - to celowe, dzieki temu
+    fetch_cached_verdicts znajdzie ta sama ocene niezaleznie od kierunku
+    zapytania). `rows`: wiersze kandydatow (dicty z kluczami Source_URL,
     Target_URL, Ocena_AI) - TYLKO niepuste Ocena_AI sa zapisywane (blad
     zapytania/pominiete przy przerwaniu nie zasmiecaja cache pustymi
     wartosciami, ktore potem falszywie wygladalyby jak "juz ocenione: brak
@@ -112,16 +131,19 @@ def upsert_verdicts(
     if not supabase_url or not supabase_key:
         return None
 
-    payload = [
-        {
-            "source_url": r["Source_URL"],
-            "target_url": r["Target_URL"],
-            "ocena": r["Ocena_AI"],
-            "model": model,
-        }
-        for r in rows
-        if r.get("Ocena_AI")
-    ]
+    payload = []
+    seen = set()
+    for r in rows:
+        if not r.get("Ocena_AI"):
+            continue
+        key = canonical_pair(r["Source_URL"], r["Target_URL"])
+        if key in seen:
+            # Oba kierunki (A->B i B->A) tej samej pary w tej samej paczce -
+            # patrz ai_eval.evaluate_embedding_candidates (dedup A<->B) -
+            # zapisz kanoniczny wiersz tylko raz.
+            continue
+        seen.add(key)
+        payload.append({"source_url": key[0], "target_url": key[1], "ocena": r["Ocena_AI"], "model": model})
     if not payload:
         return None
 

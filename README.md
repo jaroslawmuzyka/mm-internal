@@ -163,6 +163,16 @@ Tylko pary, ktorych NIE MA jeszcze w cache, ida do OpenAI - ich wynik jest
 zapisywany do tej samej tabeli NA BIEZACO (paczka po paczce, wiec przerwanie
 przyciskiem "Przerwij" nie traci juz uzyskanych ocen).
 
+**Symetria A<->B:** ocena tematycznej spojnosci nie zalezy od kierunku - "czy
+A pasuje do B" i "czy B pasuje do A" to dokladnie to samo pytanie. Jesli
+warstwa embedding_podobienstwo zaproponuje OBA kierunki tej samej pary (moze
+sie zdarzyc - kazda strona dostaje swoj wlasny top-N niezaleznie), narzedzie
+NIE pyta o nie OpenAI dwa razy: sa oceniane JEDNYM zapytaniem, a wynik trafia
+do obu wierszy. To samo dotyczy cache Supabase - kazda para jest tam
+zapisywana pod kanonicznym (posortowanym) kluczem, wiec ocena zapisana dla
+A->B jest tez znajdowana przy pytaniu o B->A w kolejnym biegu (patrz
+`ai_eval.canonical_pair`).
+
 **Jak skonfigurowac (jednorazowo):**
 1. Zaloz projekt na [supabase.com](https://supabase.com) (darmowy plan
    wystarczy do tego zastosowania).
