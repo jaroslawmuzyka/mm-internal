@@ -192,7 +192,7 @@ with st.expander("Jak to dziala? (kliknij, zeby rozwinac)", expanded=False):
      (niezalezne od limitu "Maksymalna roznica poziomow" - to jest link "w gore" o 1 poziom).
 7. **`embedding_podobienstwo`** (zawsze na samym koncu) - DODATKOWA warstwa, niezalezna od
    breadcrumba: cosine similarity miedzy embeddingami tresci stron (jesli kolumna jest
-   dostepna w Internal HTML), max **10** najbardziej podobnych stron per strona (suwak nizej),
+   dostepna w Internal HTML), max **20** najbardziej podobnych stron per strona (suwak nizej),
    ale TYLKO pary, ktorych ZADNA z powyzszych regul jeszcze nie zaproponowala - nie duplikuje,
    tylko dokdada. Kolumna `Podobienstwo` (0-1) jest wypelniona tylko dla tych wierszy. To
    JEDYNA warstwa bez potwierdzenia strukturalnego (breadcrumb) - stad opcjonalna ocena AI
@@ -537,9 +537,9 @@ max_level_diff = st.slider(
 )
 
 embedding_top_n = st.slider(
-    "Liczba propozycji z warstwy embedding_podobienstwo na strone (0 = wylacz, max 10)",
+    "Liczba propozycji z warstwy embedding_podobienstwo na strone (0 = wylacz, max 20)",
     min_value=0,
-    max_value=10,
+    max_value=20,
     value=10,
     help=(
         "Dodatkowa warstwa rekomendacji oparta o podobienstwo tresci (cosine similarity "

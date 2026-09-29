@@ -300,7 +300,7 @@ mapowania przez osobny arkusz Main Category → Final URL).
    warstwa po prostu jest pusta, reszta narzedzia dziala normalnie. Dla
    kazdej strony z poprawnym embeddingiem liczy **cosine similarity** do
    wszystkich innych stron z embeddingiem i wybiera `embedding_top_n`
-   (suwak w UI, domyslnie **10** = max) najbardziej podobnych - ale
+   (suwak w UI, domyslnie **10**, max **20**) najbardziej podobnych - ale
    **pomijajac pary, ktore juz maja rekomendacje z ktorejkolwiek innej
    reguly** (niezaleznie czy zostaly odciete limitem glebokosci). To
    gwarantuje, ze ta warstwa tylko DOKLADA nowe propozycje, nigdy nie
