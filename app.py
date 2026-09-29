@@ -18,7 +18,7 @@ import time
 import pandas as pd
 import streamlit as st
 
-from linking_engine import build_pages, run_all_rules
+from linking_engine import build_pages, run_all_rules, EMBEDDING_TOP_N_MAX
 from io_utils import read_url_list_file, read_internal_html_file
 from export import build_review_workbook, build_contentful_matrix, SOURCE_TYPE_SHEET_NAMES
 import ai_eval
@@ -537,9 +537,9 @@ max_level_diff = st.slider(
 )
 
 embedding_top_n = st.slider(
-    "Liczba propozycji z warstwy embedding_podobienstwo na strone (0 = wylacz, max 20)",
+    f"Liczba propozycji z warstwy embedding_podobienstwo na strone (0 = wylacz, max {EMBEDDING_TOP_N_MAX})",
     min_value=0,
-    max_value=20,
+    max_value=EMBEDDING_TOP_N_MAX,
     value=10,
     help=(
         "Dodatkowa warstwa rekomendacji oparta o podobienstwo tresci (cosine similarity "

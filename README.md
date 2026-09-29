@@ -301,10 +301,14 @@ mapowania przez osobny arkusz Main Category → Final URL).
    kazdej strony z poprawnym embeddingiem liczy **cosine similarity** do
    wszystkich innych stron z embeddingiem i wybiera `embedding_top_n`
    (suwak w UI, domyslnie **10**, max **20**) najbardziej podobnych - ale
-   **pomijajac pary, ktore juz maja rekomendacje z ktorejkolwiek innej
-   reguly** (niezaleznie czy zostaly odciete limitem glebokosci). To
-   gwarantuje, ze ta warstwa tylko DOKLADA nowe propozycje, nigdy nie
-   duplikuje tego, co juz jest gdzie indziej. Wiersze tej reguly maja
+   **pomijajac pary, ktore juz sa na widocznej liscie kandydatow z
+   ktorejkolwiek innej reguly**. To gwarantuje, ze ta warstwa tylko DOKLADA
+   nowe propozycje, nigdy nie duplikuje tego, co juz jest gdzie indziej.
+   Pary odciete limitem glebokosci (arkusz `Pominiete_zbyt_glebokie`) NIE
+   liczą się jako "juz na liscie" - ta warstwa MOZE je ponownie zaproponowac
+   jako embedding_podobienstwo, jesli podobienstwo tresci je wytypuje, dajac
+   im "druga szanse" ocenianą przez AI zamiast od razu odrzucac sama
+   heurystyka glebokosci. Wiersze tej reguly maja
    dodatkowo wypelniona kolumne `Podobienstwo` (0-1) - dla reszty regul jest
    pusta. Strony bez uzytecznego embeddingu (brak kolumny, blad parsowania,
    dlugosc wektora inna niz najczestsza w danych) trafiaja do metryki w

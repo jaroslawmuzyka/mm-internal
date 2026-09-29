@@ -590,7 +590,11 @@ def build_brand_filter_candidates(
 
 EMBEDDING_RULE = "embedding_podobienstwo"
 EMBEDDING_TOP_N_DEFAULT = 5
-EMBEDDING_TOP_N_MAX = 10  # twardy limit - nie wiecej niz 10 propozycji z tej warstwy per strona
+# Twardy limit - nie wiecej niz tyle propozycji z tej warstwy per strona.
+# JEDYNE zrodlo prawdy dla gornej granicy suwaka w app.py (importowane stamtad
+# wprost) - nie duplikuj tej liczby drugi raz w app.py, zeby oba miejsca nie
+# rozjechaly sie znowu tak jak przy podniesieniu z 10 do 20.
+EMBEDDING_TOP_N_MAX = 20
 
 
 def build_embedding_candidates(
@@ -605,15 +609,23 @@ def build_embedding_candidates(
     dziala na WSZYSTKICH stronach ktore maja embedding, niezaleznie czy to
     kategoria, filtr czy marka.
 
-    Dla kazdej strony z poprawnym embeddingiem wybiera `top_n` (twardy limit
-    EMBEDDING_TOP_N_MAX = 10, niezaleznie co przekazano) najbardziej podobnych
+    Dla kazdej strony z poprawnym embeddingiem wybiera `top_n` (przycieta do
+    EMBEDDING_TOP_N_MAX, niezaleznie co przekazano) najbardziej podobnych
     innych stron z embeddingiem, POMIJAJAC:
       - autolinkowanie (source == target)
       - pary juz obecne w `excluded_pairs` (Source_URL, Target_URL) - czyli te,
-        ktore maja juz rekomendacje z ktorejkolwiek innej reguly (kategoria/
-        filtr/marka/nadrzedna), NIEZALEZNIE czy zostaly odciete limitem
-        glebokosci czy nie. Dzieki temu ta warstwa tylko DOKLADA nowe
-        propozycje, nigdy nie duplikuje tego, co juz jest gdzie indziej.
+        ktore maja juz rekomendacje z ktorejkolwiek innej reguly i faktycznie
+        TRAFIAJA na widoczna liste kandydatow (`all_candidates`). Dzieki temu
+        ta warstwa tylko DOKLADA nowe propozycje, nigdy nie duplikuje tego,
+        co juz jest widoczne gdzie indziej.
+      - UWAGA: pary odciete limitem glebokosci (kategoria_podrzedna/
+        filtr_podrzedny, patrz max_level_diff w run_all_rules) NIE sa w
+        `excluded_pairs` - efektywnie nie sa "juz na liscie" (trafiaja tylko
+        do osobnego arkusza Pominiete_zbyt_glebokie do recznej oceny), wiec ta
+        warstwa MOZE je ponownie zaproponowac jako embedding_podobienstwo,
+        jesli cosine similarity je wytypuje - to celowe: pozwala AI dac
+        drugi, niezalezny "glos" (tematyczne podobienstwo + ocena modelu)
+        na temat pary, ktora zgruby heurystyka glebokosci by odrzucila.
 
     Strony bez uzytecznego embeddingu (brak kolumny, blad parsowania, albo
     dlugosc wektora inna niz najczestsza w danych - nie da sie ich policzyc
@@ -902,8 +914,13 @@ def run_all_rules(
         hierarchy_within + brand_candidates + filter_within
         + parent_link_candidates + brand_filter_candidates
     )
+    # Celowo TYLKO structural_raw (widoczna lista kandydatow) - pary odciete
+    # limitem glebokosci (hierarchy_cut/filter_cut) NIE blokuja warstwy
+    # embeddingowej, zeby AI + podobienstwo tresci mogly dac im "druga szanse"
+    # zamiast od razu odrzucac je sama heurystyka glebokosci (patrz docstring
+    # build_embedding_candidates).
     already_covered_pairs = {
-        (c["Source_URL"], c["Target_URL"]) for c in structural_raw + hierarchy_cut + filter_cut
+        (c["Source_URL"], c["Target_URL"]) for c in structural_raw
     }
     embedding_candidates, embedding_skipped = build_embedding_candidates(
         pages, already_covered_pairs, top_n=embedding_top_n
